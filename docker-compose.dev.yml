@@ -1,0 +1,40 @@
+# Development docker-compose - builds image locally
+# Usage: docker compose -f docker-compose.dev.yml up -d
+
+version: '3.8'
+
+services:
+  aviant-push-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aviant-push-bridge-dev
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    environment:
+      # MQTT Broker (update with your MQTT broker details)
+      - MQTT_HOST=mqtt://192.168.1.100:1883
+      - MQTT_USERNAME=
+      - MQTT_PASSWORD=
+      - MQTT_TOPIC=frigate/events
+      
+      # Bridge settings
+      - BRIDGE_PORT=3002
+      
+      # Notification settings
+      - NOTIFICATION_COOLDOWN=30
+      
+      # Filters (optional - leave empty for all)
+      - FILTER_LABELS=
+      - FILTER_CAMERAS=
+      
+      # Security (optional)
+      # - AUTH_TOKEN=
+    
+    # Mount source for hot-reload during development
+    volumes:
+      - ./src:/app/src:ro
+    
+    # If running on same host as Frigate/MQTT, can use host network
+    # network_mode: host
