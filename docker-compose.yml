@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   aviant-push-bridge:
-    image: ghcr.io/wjbeckett/aviant-push-bridge:latest
+    # Use pre-built image from GitHub Container Registry
+    # Automatically pulls latest version on 'docker compose pull'
+    image: ghcr.io/your-username/aviant-push-bridge:latest
     container_name: aviant-push-bridge
     restart: unless-stopped
     ports:
@@ -13,13 +15,20 @@ services:
       - MQTT_USERNAME=
       - MQTT_PASSWORD=
       - MQTT_TOPIC=frigate/events
+      
+      # Frigate server (for thumbnail images)
+      - FRIGATE_URL=http://192.168.1.100:5000
+      
       # Bridge settings
       - BRIDGE_PORT=3002
+      
       # Notification settings
       - NOTIFICATION_COOLDOWN=30
+      
       # Filters (optional - leave empty for all)
       - FILTER_LABELS=
       - FILTER_CAMERAS=
+    
     # If running on same host as Frigate/MQTT, can use host network
     # network_mode: host
     

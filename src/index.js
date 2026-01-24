@@ -16,6 +16,9 @@ const config = {
     password: process.env.MQTT_PASSWORD,
     topic: process.env.MQTT_TOPIC || 'frigate/events',
   },
+  frigate: {
+    url: process.env.FRIGATE_URL || 'http://localhost:5000',
+  },
   bridge: {
     port: parseInt(process.env.BRIDGE_PORT || '3002'),
   },
@@ -239,25 +242,52 @@ async function sendPushNotifications(event) {
     ? new Date(event.after.start_time * 1000).toLocaleTimeString()
     : new Date().toLocaleTimeString();
   
+  // Build thumbnail URL from Frigate event ID
+  // Frigate thumbnail format: /api/events/{event_id}/thumbnail.jpg
+  const eventId = event.after?.id;
+  const thumbnailUrl = eventId 
+    ? `${config.frigate.url}/api/events/${eventId}/thumbnail.jpg`
+    : null;
+  
+  // Capitalize label for cleaner display
+  const capitalizedLabel = label.charAt(0).toUpperCase() + label.slice(1);
+  
   // Prepare notification messages for all tokens
-  const messages = Array.from(pushTokens).map(token => ({
-    to: token,
-    sound: 'default',
-    title: `${label} detected ${score}`,
-    body: `${camera.replace(/_/g, ' ')} • ${timestamp}`,
-    priority: 'high',
-    data: {
-      eventId: event.after?.id,
-      camera: event.after?.camera,
-      label: event.after?.label,
-      score: event.after?.score,
-      thumbnail: event.after?.thumbnail,
-      type: 'frigate_detection',
-    },
-  }));
+  const messages = Array.from(pushTokens).map(token => {
+    const message = {
+      to: token,
+      sound: 'default',
+      title: `${capitalizedLabel} detected ${score}`,
+      body: `${camera.replace(/_/g, ' ')} • ${timestamp}`,
+      priority: 'high',
+      data: {
+        eventId: eventId,
+        camera: camera,
+        label: label,
+        score: event.after?.score,
+        thumbnailUrl: thumbnailUrl,
+        type: 'frigate_detection',
+      },
+    };
+    
+    // Add thumbnail image if available
+    if (thumbnailUrl) {
+      // Android: uses 'image' field
+      message.image = thumbnailUrl;
+      
+      // iOS: uses 'attachments' array in 'ios' field
+      message.ios = {
+        attachments: [{
+          url: thumbnailUrl,
+        }],
+      };
+    }
+    
+    return message;
+  });
   
   try {
-    console.log(`[Push] Sending ${messages.length} notification(s)...`);
+    console.log(`[Push] Sending ${messages.length} notification(s)${thumbnailUrl ? ' with image attachment' : ''}...`);
     
     const response = await axios.post(
       'https://exp.host/--/api/v2/push/send',

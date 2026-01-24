@@ -1,6 +1,6 @@
 {
   "name": "aviant-push-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MQTT to Expo Push notification bridge for Aviant Frigate mobile app",
   "main": "src/index.js",
   "scripts": {
