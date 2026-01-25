@@ -37,13 +37,14 @@ environment:
   - MQTT_HOST=mqtt://192.168.1.100:1883
   - MQTT_USERNAME=your_mqtt_user  # Leave empty if no auth
   - MQTT_PASSWORD=your_mqtt_pass  # Leave empty if no auth
-  - MQTT_TOPIC=frigate/events
+  - MQTT_TOPIC=frigate/reviews     # Recommended (use frigate/events for legacy)
   
   # OPTIONAL: Fine-tuning (defaults shown)
   - BRIDGE_PORT=3002
   - NOTIFICATION_COOLDOWN=30
-  - FILTER_LABELS=              # Leave empty for all labels
-  - FILTER_CAMERAS=             # Leave empty for all cameras
+  - SEVERITY_FILTER=alert          # 'alert', 'detection', or 'all'
+  - FILTER_LABELS=                 # Leave empty for all labels
+  - FILTER_CAMERAS=                # Leave empty for all cameras
 ```
 
 **Common MQTT broker locations:**
@@ -136,13 +137,14 @@ docker run -d --env-file .env -p 3002:3002 aviant-push-bridge
 | `MQTT_HOST` | ✅ Yes | `mqtt://localhost:1883` | MQTT broker URL |
 | `MQTT_USERNAME` | No | - | MQTT username (if broker requires auth) |
 | `MQTT_PASSWORD` | No | - | MQTT password (if broker requires auth) |
-| `MQTT_TOPIC` | No | `frigate/events` | MQTT topic to subscribe to |
+| `MQTT_TOPIC` | No | `frigate/reviews` | MQTT topic to subscribe to. Use `frigate/reviews` (recommended) for consolidated alerts, or `frigate/events` for individual object tracking (verbose). |
 | **Bridge Settings** ||||
 | `BRIDGE_PORT` | No | `3002` | HTTP server port |
 | `NOTIFICATION_COOLDOWN` | No | `30` | Seconds between notifications per camera |
-| **Filters (Optional)** ||||
-| `FILTER_LABELS` | No | - | Comma-separated labels (e.g., `person,car,dog`) |
-| `FILTER_CAMERAS` | No | - | Comma-separated cameras (e.g., `driveway,backyard`) |
+| **Notification Filters** ||||
+| `SEVERITY_FILTER` | No | `alert` | Filter by review severity: `alert` (only alerts), `detection` (only detections), or `all` (everything). Only applies to `frigate/reviews` topic. |
+| `FILTER_LABELS` | No | - | Comma-separated labels (e.g., `person,car,dog`). Leave empty for all. |
+| `FILTER_CAMERAS` | No | - | Comma-separated cameras (e.g., `driveway,backyard`). Leave empty for all. |
 | **Auto-Configured by App** ||||
 | `FRIGATE_JWT_TOKEN` | 🤖 Auto | - | **Sent automatically by app** when you register. Can manually override if needed. |
 | `EXTERNAL_FRIGATE_URL` | 🤖 Auto | - | **Sent automatically by app** from your Frigate server URL. Used for notification thumbnails. |
@@ -150,7 +152,50 @@ docker run -d --env-file .env -p 3002:3002 aviant-push-bridge
 
 **Note:** Variables marked with 🤖 are automatically configured by the Aviant mobile app when you register your device. The app sends your Frigate credentials from your login session, so you don't need to copy/paste JWT tokens manually!
 
-### Filtering Examples
+### MQTT Topic: Events vs Reviews
+
+**Recommended: `frigate/reviews`** (Default)
+- ✅ Consolidated notifications (groups related objects)
+- ✅ Severity filtering (`alert` vs `detection`)
+- ✅ Less spam (one notification for complex activities)
+- ✅ Aligns with Frigate UI behavior
+- Example: Person exits car = **1 notification** with both objects
+
+**Legacy: `frigate/events`**
+- ❌ Very verbose (separate notification per object)
+- ❌ No severity levels
+- ❌ Multiple messages for same activity (`new`, `update`, `end`)
+- Example: Person exits car = **2 notifications** (car, then person)
+
+**When to use `frigate/events`:**
+- You need granular per-object tracking
+- You want notifications for every object state change
+- You have custom filtering logic
+
+### Severity Filter Examples
+
+**Default (Alerts only - Recommended):**
+```yaml
+- SEVERITY_FILTER=alert
+```
+Only sends notifications for:
+- Objects configured as alerts in Frigate (person, car by default)
+- Objects detected in alert zones
+- High-priority events
+
+**All detections (Spammy):**
+```yaml
+- SEVERITY_FILTER=all
+```
+Sends notifications for everything (not recommended - very noisy).
+
+**Detections only:**
+```yaml
+- SEVERITY_FILTER=detection
+```
+Only sends notifications for low-priority detections (animals, general activity).
+
+### Object/Camera Filter Examples
 
 **Only person and car detections:**
 ```yaml
@@ -162,11 +207,60 @@ docker run -d --env-file .env -p 3002:3002 aviant-push-bridge
 - FILTER_CAMERAS=front_door,driveway
 ```
 
-**Combine both:**
+**Combine filters:**
 ```yaml
+- SEVERITY_FILTER=alert
 - FILTER_LABELS=person
 - FILTER_CAMERAS=front_door,back_door
 ```
+Result: Only person alerts on front/back doors.
+
+## Notification Features
+
+### Custom Notification Templates
+
+Customize notification content per-device using template variables.
+
+**Configure in Aviant app:**
+1. Settings → Notification Templates
+2. Edit title and body templates
+3. Use variables: `{label}`, `{camera}`, `{zones}`, `{time}`, `{score}`
+4. Save to sync with bridge
+
+**Default templates:**
+- Title: `{label} detected on {camera}`
+- Body: `Motion in {zones} at {time}`
+
+**Example customizations:**
+- `🚨 {label} on {camera}` → "🚨 Person on Front Door"
+- `{camera}: {label} detected ({score})` → "Front Door: Person detected (95%)"
+- `Motion in {zones} at {time}` → "Motion in Driveway, Sidewalk at 2:45 PM"
+
+Templates can be updated anytime after device registration - no need to re-register!
+
+### Deep Linking & Notification Actions
+
+**Default tap behavior:** Opens live view of the camera that triggered the alert.
+
+**Action buttons:**
+- **"View Live"** → Opens live stream of the camera
+- **"View Recording"** → Opens timeline at exact detection time
+
+**Platform support:**
+- Android: Up to 3 action buttons
+- iOS: Up to 4 actions
+
+**How it works:**
+- Tap notification → App opens to live camera view
+- Tap "View Recording" button → App opens timeline at detection moment
+- All navigation is automatic - no manual searching required!
+
+**Deep link format:**
+```
+aviant://camera/{cameraName}?action=live|timeline&time={timestamp}
+```
+
+You can also use deep links from other automation tools (Home Assistant, Tasker, etc.).
 
 ## API Endpoints
 
@@ -215,6 +309,39 @@ This single endpoint:
 2. Auto-configures Frigate credentials (JWT token)
 3. Auto-configures external URL for thumbnails
 4. Stores everything in `./data/config.json`
+5. Syncs custom notification templates (if configured)
+
+### Update Device Preferences (Templates)
+```bash
+PUT http://localhost:3002/devices/:token/preferences
+Content-Type: application/json
+
+{
+  "templates": {
+    "title": "{label} detected on {camera}",
+    "body": "Motion in {zones} at {time}"
+  }
+}
+```
+
+**Automatically called by Aviant app** when you customize notification templates in Settings → Notification Templates.
+
+**Available template variables:**
+- `{label}` - Detected object (person, car, dog, etc.)
+- `{camera}` - Camera name
+- `{zones}` - Zone names (comma-separated)
+- `{time}` - Time of detection
+- `{score}` - Detection confidence score
+
+**Example custom templates:**
+```json
+{
+  "title": "🚨 {label} on {camera}",
+  "body": "Detected in {zones} with {score} confidence"
+}
+```
+
+Templates are stored per-device and can be updated anytime after registration without re-registering.
 
 ### Sync Configuration (Auto)
 ```bash

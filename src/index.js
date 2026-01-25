@@ -14,7 +14,7 @@ const config = {
     host: process.env.MQTT_HOST || 'mqtt://localhost:1883',
     username: process.env.MQTT_USERNAME,
     password: process.env.MQTT_PASSWORD,
-    topic: process.env.MQTT_TOPIC || 'frigate/events',
+    topic: process.env.MQTT_TOPIC || 'frigate/reviews', // Use reviews by default (recommended by Frigate docs)
   },
   frigate: {
     url: process.env.FRIGATE_URL || 'http://localhost:5000',
@@ -24,8 +24,9 @@ const config = {
   },
   notifications: {
     cooldown: parseInt(process.env.NOTIFICATION_COOLDOWN || '30'), // seconds between notifications per camera
-    filterLabels: process.env.FILTER_LABELS?.split(',') || [], // Only these labels (empty = all)
-    filterCameras: process.env.FILTER_CAMERAS?.split(',') || [], // Only these cameras (empty = all)
+    filterLabels: process.env.FILTER_LABELS?.split(',').filter(Boolean) || [], // Only these labels (empty = all)
+    filterCameras: process.env.FILTER_CAMERAS?.split(',').filter(Boolean) || [], // Only these cameras (empty = all)
+    severityFilter: process.env.SEVERITY_FILTER || 'alert', // 'alert', 'detection', or 'all'
   },
 };
 
@@ -77,6 +78,7 @@ let bridgeConfig = {
     cooldown: parseInt(process.env.NOTIFICATION_COOLDOWN || '30'),
     filterLabels: process.env.FILTER_LABELS?.split(',').filter(Boolean) || [],
     filterCameras: process.env.FILTER_CAMERAS?.split(',').filter(Boolean) || [],
+    severityFilter: process.env.SEVERITY_FILTER || 'alert',
   },
 };
 
@@ -183,14 +185,19 @@ app.post('/register', (req, res) => {
     return res.status(400).json({ error: 'Invalid push token format' });
   }
   
-  // Store device metadata
+  // Store device metadata (preserve existing templates if re-registering)
+  const existingDevice = devices.get(pushToken);
   const deviceInfo = {
     token: pushToken,
     name: deviceName || 'Unknown Device',
     model: deviceModel || 'Unknown Model',
     platform: platform || 'Unknown',
-    registeredAt: new Date().toISOString(),
+    registeredAt: existingDevice?.registeredAt || new Date().toISOString(),
     lastSeen: new Date().toISOString(),
+    templates: existingDevice?.templates || {
+      title: '{label} detected on {camera}',
+      body: 'Motion in {zones} at {time}',
+    },
   };
   
   pushTokens.add(pushToken);
@@ -272,6 +279,49 @@ app.delete('/devices/:token', (req, res) => {
   } else {
     res.status(404).json({ error: 'Device not found' });
   }
+});
+
+// Update device preferences (notification templates, etc.)
+app.put('/devices/:token/preferences', (req, res) => {
+  const { token } = req.params;
+  const { templates } = req.body;
+  
+  // Find device by full token match
+  const device = devices.get(token);
+  
+  if (!device) {
+    return res.status(404).json({ error: 'Device not found. Ensure you are registered first.' });
+  }
+  
+  // Validate templates if provided
+  if (templates) {
+    if (!templates.title || !templates.body) {
+      return res.status(400).json({ error: 'Templates must include both title and body' });
+    }
+    
+    if (typeof templates.title !== 'string' || typeof templates.body !== 'string') {
+      return res.status(400).json({ error: 'Template title and body must be strings' });
+    }
+    
+    // Update templates
+    device.templates = {
+      title: templates.title.trim(),
+      body: templates.body.trim(),
+    };
+    
+    devices.set(token, device);
+    saveDevices();
+    
+    console.log(`[Bridge] Updated templates for device: ${device.name}`);
+    console.log(`[Bridge]   Title: ${device.templates.title}`);
+    console.log(`[Bridge]   Body: ${device.templates.body}`);
+  }
+  
+  res.json({ 
+    success: true, 
+    message: 'Preferences updated successfully',
+    templates: device.templates,
+  });
 });
 
 // === CONFIGURATION MANAGEMENT ENDPOINTS ===
@@ -376,19 +426,17 @@ client.on('connect', () => {
   console.log('[MQTT] Connected to broker');
   stats.mqttConnected = true;
   
-  // Subscribe to Frigate events
+  // Subscribe to configured MQTT topic (frigate/reviews by default)
   client.subscribe(config.mqtt.topic, (err) => {
     if (err) {
       console.error('[MQTT] Subscription error:', err);
     } else {
       console.log(`[MQTT] Subscribed to topic: ${config.mqtt.topic}`);
-    }
-  });
-  
-  // Also subscribe to reviews (alerts)
-  client.subscribe('frigate/reviews', (err) => {
-    if (!err) {
-      console.log('[MQTT] Subscribed to topic: frigate/reviews');
+      
+      // Log recommendation if using old events topic
+      if (config.mqtt.topic === 'frigate/events') {
+        console.log('[MQTT] ⚠️  Using frigate/events topic. Consider switching to frigate/reviews for better notification management.');
+      }
     }
   });
 });
@@ -409,55 +457,225 @@ client.on('reconnect', () => {
 
 client.on('message', async (topic, message) => {
   try {
-    const event = JSON.parse(message.toString());
+    const payload = JSON.parse(message.toString());
     stats.eventsReceived++;
     stats.lastEventTime = new Date().toISOString();
     
-    // Only process 'new' events (not 'update' or 'end')
-    if (event.type !== 'new') {
-      return;
+    // Detect if this is a review or event message
+    const isReview = topic.includes('reviews') || payload.severity !== undefined;
+    
+    if (isReview) {
+      // Process frigate/reviews message (recommended)
+      await processReviewMessage(payload);
+    } else {
+      // Process legacy frigate/events message (backwards compatibility)
+      await processEventMessage(payload);
     }
-    
-    // Filter by labels if configured
-    if (bridgeConfig.notifications.filterLabels.length > 0) {
-      if (!bridgeConfig.notifications.filterLabels.includes(event.after?.label)) {
-        console.log(`[Filter] Skipping event - label '${event.after?.label}' not in filter`);
-        return;
-      }
-    }
-    
-    // Filter by cameras if configured
-    if (bridgeConfig.notifications.filterCameras.length > 0) {
-      if (!bridgeConfig.notifications.filterCameras.includes(event.after?.camera)) {
-        console.log(`[Filter] Skipping event - camera '${event.after?.camera}' not in filter`);
-        return;
-      }
-    }
-    
-    // Check cooldown to prevent spam
-    const cooldownKey = `${event.after?.camera}_${event.after?.label}`;
-    const lastNotification = notificationCooldowns.get(cooldownKey);
-    const now = Date.now();
-    
-    if (lastNotification && (now - lastNotification) < bridgeConfig.notifications.cooldown * 1000) {
-      console.log(`[Cooldown] Skipping notification for ${cooldownKey} (cooldown active)`);
-      return;
-    }
-    
-    // Update cooldown
-    notificationCooldowns.set(cooldownKey, now);
-    
-    console.log(`[Event] ${event.after?.label} detected on ${event.after?.camera}`);
-    
-    // Send push notification
-    await sendPushNotifications(event);
     
   } catch (err) {
     console.error('[MQTT] Error processing message:', err.message);
   }
 });
 
-// Send push notifications to all registered tokens
+// Process frigate/reviews message (new format)
+async function processReviewMessage(review) {
+  // Only process 'new' and 'update' reviews (not 'end')
+  // 'new' = review just started
+  // 'update' = review severity changed (detection -> alert) or new objects added
+  if (review.type !== 'new' && review.type !== 'update') {
+    return;
+  }
+  
+  // Get review data
+  const camera = review.after?.camera || review.camera;
+  const severity = review.after?.severity || review.severity;
+  const reviewId = review.after?.id || review.id;
+  const startTime = review.after?.start_time || review.start_time;
+  const objects = review.after?.data?.objects || review.data?.objects || [];
+  const zones = review.after?.data?.zones || review.data?.zones || [];
+  
+  // Filter by severity (default: only alerts)
+  if (bridgeConfig.notifications.severityFilter !== 'all') {
+    if (severity !== bridgeConfig.notifications.severityFilter) {
+      console.log(`[Filter] Skipping review - severity '${severity}' doesn't match filter '${bridgeConfig.notifications.severityFilter}'`);
+      return;
+    }
+  }
+  
+  // Filter by cameras if configured
+  if (bridgeConfig.notifications.filterCameras.length > 0) {
+    if (!bridgeConfig.notifications.filterCameras.includes(camera)) {
+      console.log(`[Filter] Skipping review - camera '${camera}' not in filter`);
+      return;
+    }
+  }
+  
+  // Filter by labels if configured (check if any object matches)
+  if (bridgeConfig.notifications.filterLabels.length > 0) {
+    const hasMatchingLabel = objects.some(obj => bridgeConfig.notifications.filterLabels.includes(obj));
+    if (!hasMatchingLabel) {
+      console.log(`[Filter] Skipping review - no objects match label filter`);
+      return;
+    }
+  }
+  
+  // Check cooldown to prevent spam
+  const cooldownKey = `${camera}_review`;
+  const lastNotification = notificationCooldowns.get(cooldownKey);
+  const now = Date.now();
+  
+  if (lastNotification && (now - lastNotification) < bridgeConfig.notifications.cooldown * 1000) {
+    console.log(`[Cooldown] Skipping notification for ${cooldownKey} (cooldown active)`);
+    return;
+  }
+  
+  // Update cooldown
+  notificationCooldowns.set(cooldownKey, now);
+  
+  console.log(`[Review] ${severity.toUpperCase()} on ${camera}: ${objects.join(', ')}`);
+  
+  // Send push notification
+  await sendReviewNotification({
+    reviewId,
+    camera,
+    severity,
+    objects,
+    zones,
+    startTime,
+    type: review.type, // 'new' or 'update'
+  });
+}
+
+// Process legacy frigate/events message (old format - backwards compatibility)
+async function processEventMessage(event) {
+  // Only process 'new' events (not 'update' or 'end')
+  if (event.type !== 'new') {
+    return;
+  }
+  
+  // Filter by labels if configured
+  if (bridgeConfig.notifications.filterLabels.length > 0) {
+    if (!bridgeConfig.notifications.filterLabels.includes(event.after?.label)) {
+      console.log(`[Filter] Skipping event - label '${event.after?.label}' not in filter`);
+      return;
+    }
+  }
+  
+  // Filter by cameras if configured
+  if (bridgeConfig.notifications.filterCameras.length > 0) {
+    if (!bridgeConfig.notifications.filterCameras.includes(event.after?.camera)) {
+      console.log(`[Filter] Skipping event - camera '${event.after?.camera}' not in filter`);
+      return;
+    }
+  }
+  
+  // Check cooldown to prevent spam
+  const cooldownKey = `${event.after?.camera}_${event.after?.label}`;
+  const lastNotification = notificationCooldowns.get(cooldownKey);
+  const now = Date.now();
+  
+  if (lastNotification && (now - lastNotification) < bridgeConfig.notifications.cooldown * 1000) {
+    console.log(`[Cooldown] Skipping notification for ${cooldownKey} (cooldown active)`);
+    return;
+  }
+  
+  // Update cooldown
+  notificationCooldowns.set(cooldownKey, now);
+  
+  console.log(`[Event] ${event.after?.label} detected on ${event.after?.camera}`);
+  
+  // Send push notification (legacy format)
+  await sendPushNotifications(event);
+}
+
+// Send push notifications for frigate/reviews (new format)
+async function sendReviewNotification(review) {
+  if (pushTokens.size === 0) {
+    console.log('[Push] No registered tokens, skipping notification');
+    return;
+  }
+  
+  const { reviewId, camera, severity, objects, zones, startTime, type } = review;
+  
+  // Format objects list for notification title
+  const objectsList = objects.length > 0 ? objects.join(', ') : 'Activity';
+  const capitalizedObjects = objectsList.split(', ').map(obj => 
+    obj.charAt(0).toUpperCase() + obj.slice(1)
+  ).join(', ');
+  
+  // Build thumbnail URL for review
+  let thumbnailUrl = null;
+  if (reviewId) {
+    // Reviews use a different thumbnail endpoint
+    thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/review/${reviewId}/thumbnail.jpg`;
+    if (bridgeConfig.frigateJwtToken) {
+      thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
+    }
+  }
+  
+  // Add severity indicator to title
+  const severityEmoji = severity === 'alert' ? '🚨' : '👀';
+  const titlePrefix = severity === 'alert' ? 'Alert' : 'Detection';
+  
+  // Format camera name
+  const formattedCamera = camera.replace(/_/g, ' ');
+  
+  // Prepare notification messages for all tokens
+  const messages = Array.from(pushTokens).map(token => {
+    const message = {
+      to: token,
+      sound: 'default',
+      title: `${titlePrefix}: ${capitalizedObjects}`,
+      body: `${formattedCamera}${zones.length > 0 ? ` (${zones.join(', ')})` : ''}`,
+      priority: severity === 'alert' ? 'high' : 'normal',
+      data: {
+        reviewId: reviewId,
+        camera: camera,
+        objects: objects,
+        zones: zones,
+        severity: severity,
+        timestamp: startTime,
+        type: type === 'update' ? 'frigate_review_update' : 'frigate_review',
+        thumbnailUrl: thumbnailUrl,
+      },
+    };
+    
+    // Add thumbnail image if available
+    if (thumbnailUrl) {
+      message.image = thumbnailUrl; // Android
+      message.ios = {
+        attachments: [{ url: thumbnailUrl }], // iOS
+      };
+    }
+    
+    return message;
+  });
+  
+  // Send to Expo Push API
+  try {
+    const response = await axios.post('https://exp.host/--/api/v2/push/send', messages, {
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+    
+    stats.notificationsSent += messages.length;
+    console.log(`[Push] Sent ${messages.length} notification(s) for review ${reviewId} (${severity})`);
+    
+    // Log any errors from Expo
+    if (response.data && response.data.data) {
+      response.data.data.forEach((result, index) => {
+        if (result.status === 'error') {
+          console.error(`[Push] Error sending to token ${index + 1}:`, result.message);
+        }
+      });
+    }
+  } catch (error) {
+    console.error('[Push] Failed to send notifications:', error.message);
+  }
+}
+
+// Send push notifications to all registered tokens (legacy frigate/events format)
 async function sendPushNotifications(event) {
   if (pushTokens.size === 0) {
     console.log('[Push] No registered tokens, skipping notification');
@@ -487,14 +705,41 @@ async function sendPushNotifications(event) {
   // Capitalize label for cleaner display
   const capitalizedLabel = label.charAt(0).toUpperCase() + label.slice(1);
   
-  // Prepare notification messages for all tokens
+  // Helper function to format template with event data
+  const formatTemplate = (template, eventData) => {
+    return template
+      .replace(/{label}/g, eventData.capitalizedLabel)
+      .replace(/{camera}/g, eventData.cameraFormatted)
+      .replace(/{zones}/g, eventData.zones || 'Unknown')
+      .replace(/{time}/g, eventData.time)
+      .replace(/{score}/g, eventData.scoreFormatted);
+  };
+  
+  // Prepare data for template formatting
+  const templateData = {
+    capitalizedLabel: capitalizedLabel,
+    cameraFormatted: camera.replace(/_/g, ' '),
+    zones: event.after?.current_zones?.join(', ') || '',
+    time: new Date(startTime * 1000).toLocaleTimeString(),
+    scoreFormatted: event.after?.score ? `${Math.round(event.after.score * 100)}%` : '',
+  };
+  
+  // Prepare notification messages for all tokens (with per-device templates)
   const messages = Array.from(pushTokens).map(token => {
+    // Get device-specific templates (or use defaults)
+    const device = devices.get(token);
+    const templates = device?.templates || {
+      title: '{label} detected on {camera}',
+      body: 'Motion in {zones} at {time}',
+    };
+    
     const message = {
       to: token,
       sound: 'default',
-      title: `${capitalizedLabel} detected ${score}`,
-      body: `${camera.replace(/_/g, ' ')}`, // Don't include timestamp in body - mobile app will format it
+      title: formatTemplate(templates.title, templateData),
+      body: formatTemplate(templates.body, templateData),
       priority: 'high',
+      categoryId: 'frigate_detection', // For iOS notification categories
       data: {
         eventId: eventId,
         camera: camera,
@@ -503,6 +748,7 @@ async function sendPushNotifications(event) {
         thumbnailUrl: thumbnailUrl,
         timestamp: startTime, // Send Unix timestamp for local formatting
         type: 'frigate_detection',
+        action: 'live', // Default action when tapped
       },
     };
     
@@ -518,6 +764,15 @@ async function sendPushNotifications(event) {
         }],
       };
     }
+    
+    // Add action buttons (Android & iOS)
+    // Android automatically shows actions from data
+    // iOS requires notification categories to be registered in the app
+    message.android = {
+      sound: 'default',
+      priority: 'high',
+      channelId: 'frigate-detections',
+    };
     
     return message;
   });

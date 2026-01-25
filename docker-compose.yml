@@ -18,7 +18,7 @@ services:
       - MQTT_HOST=mqtt://192.168.1.100:1883
       - MQTT_USERNAME=
       - MQTT_PASSWORD=
-      - MQTT_TOPIC=frigate/events
+      - MQTT_TOPIC=frigate/reviews
       
       # ============================================
       # OPTIONAL: Bridge Settings
@@ -27,8 +27,14 @@ services:
       - NOTIFICATION_COOLDOWN=30
       
       # ============================================
-      # OPTIONAL: Event Filters
+      # OPTIONAL: Notification Filters
       # ============================================
-      # Comma-separated, leave empty for all
+      # Severity filter: 'alert' (default), 'detection', or 'all'
+      # 'alert' = Only high-priority events (person, car, or objects in alert zones)
+      # 'detection' = Only low-priority general detections
+      # 'all' = Everything
+      - SEVERITY_FILTER=alert
+      
+      # Object/camera filters (comma-separated, leave empty for all)
       - FILTER_LABELS=
       - FILTER_CAMERAS=
