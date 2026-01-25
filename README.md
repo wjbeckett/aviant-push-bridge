@@ -114,7 +114,8 @@ docker run -d --env-file .env -p 3002:3002 aviant-push-bridge
 | `MQTT_USERNAME` | - | MQTT username (if required) |
 | `MQTT_PASSWORD` | - | MQTT password (if required) |
 | `MQTT_TOPIC` | `frigate/events` | MQTT topic to subscribe to |
-| `FRIGATE_URL` | `http://localhost:5000` | Frigate server URL (for thumbnail images) |
+| `FRIGATE_URL` | `http://localhost:5000` | Internal Frigate server URL (for MQTT connection) |
+| `EXTERNAL_FRIGATE_URL` | Same as `FRIGATE_URL` | **External Frigate URL** - Must be publicly accessible from mobile devices for thumbnail images (e.g., `https://cctv.example.com`) |
 | `BRIDGE_PORT` | `3002` | HTTP server port |
 | `NOTIFICATION_COOLDOWN` | `30` | Seconds between notifications per camera |
 | `FILTER_LABELS` | - | Comma-separated labels (e.g., `person,car,dog`) |

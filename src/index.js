@@ -238,15 +238,17 @@ async function sendPushNotifications(event) {
   const label = event.after?.label || 'Object';
   const camera = event.after?.camera || 'Unknown';
   const score = event.after?.score ? `(${Math.round(event.after.score * 100)}%)` : '';
-  const timestamp = event.after?.start_time 
-    ? new Date(event.after.start_time * 1000).toLocaleTimeString()
-    : new Date().toLocaleTimeString();
+  
+  // Send Unix timestamp to mobile app so it can format in user's local timezone
+  const startTime = event.after?.start_time || Math.floor(Date.now() / 1000);
   
   // Build thumbnail URL from Frigate event ID
-  // Frigate thumbnail format: /api/events/{event_id}/thumbnail.jpg
+  // Use EXTERNAL Frigate URL (not internal localhost)
+  // Important: This must be the publicly accessible URL
   const eventId = event.after?.id;
+  const externalFrigateUrl = process.env.EXTERNAL_FRIGATE_URL || config.frigate.url;
   const thumbnailUrl = eventId 
-    ? `${config.frigate.url}/api/events/${eventId}/thumbnail.jpg`
+    ? `${externalFrigateUrl}/api/events/${eventId}/thumbnail.jpg`
     : null;
   
   // Capitalize label for cleaner display
@@ -258,7 +260,7 @@ async function sendPushNotifications(event) {
       to: token,
       sound: 'default',
       title: `${capitalizedLabel} detected ${score}`,
-      body: `${camera.replace(/_/g, ' ')} • ${timestamp}`,
+      body: `${camera.replace(/_/g, ' ')}`, // Don't include timestamp in body - mobile app will format it
       priority: 'high',
       data: {
         eventId: eventId,
@@ -266,6 +268,7 @@ async function sendPushNotifications(event) {
         label: label,
         score: event.after?.score,
         thumbnailUrl: thumbnailUrl,
+        timestamp: startTime, // Send Unix timestamp for local formatting
         type: 'frigate_detection',
       },
     };

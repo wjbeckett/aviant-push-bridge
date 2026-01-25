@@ -16,8 +16,12 @@ services:
       - MQTT_PASSWORD=
       - MQTT_TOPIC=frigate/events
       
-      # Frigate server (for thumbnail images)
+      # Frigate server (internal URL for MQTT connection)
       - FRIGATE_URL=http://192.168.1.100:5000
+      
+      # External Frigate URL (must be accessible from mobile devices for images)
+      # Use your public/external URL
+      - EXTERNAL_FRIGATE_URL=https://frigate.example.com
       
       # Bridge settings
       - BRIDGE_PORT=3002
