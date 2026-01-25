@@ -18,64 +18,86 @@ MQTT to Expo Push notification bridge for the Aviant Frigate mobile app.
 - Frigate with MQTT configured
 - Aviant mobile app installed
 
-### Installation
+### Installation (Super Simple - 3 Steps!)
 
-#### Option 1: Using Pre-Built Image (Recommended)
-
-1. **Download docker-compose.yml:**
+#### 1. Download docker-compose.yml
 
 ```bash
 wget https://raw.githubusercontent.com/your-username/aviant-push-bridge/main/docker-compose.yml
-# Or create manually with the configuration below
+# Or create manually from the template
 ```
 
-2. **Edit `docker-compose.yml`:**
+#### 2. Configure MQTT Connection
 
-Update the image URL (replace `your-username` with the actual GitHub username):
-```yaml
-image: ghcr.io/your-username/aviant-push-bridge:latest
-```
+**Edit docker-compose.yml** - Only MQTT settings are required:
 
-Configure MQTT and Frigate connection:
 ```yaml
 environment:
+  # REQUIRED: Your MQTT broker details
   - MQTT_HOST=mqtt://192.168.1.100:1883
-  - MQTT_USERNAME=your_mqtt_user  # If MQTT requires auth
-  - MQTT_PASSWORD=your_mqtt_pass  # If MQTT requires auth
-  - FRIGATE_URL=http://192.168.1.100:5000  # Your Frigate server URL
+  - MQTT_USERNAME=your_mqtt_user  # Leave empty if no auth
+  - MQTT_PASSWORD=your_mqtt_pass  # Leave empty if no auth
+  - MQTT_TOPIC=frigate/events
+  
+  # OPTIONAL: Fine-tuning (defaults shown)
+  - BRIDGE_PORT=3002
+  - NOTIFICATION_COOLDOWN=30
+  - FILTER_LABELS=              # Leave empty for all labels
+  - FILTER_CAMERAS=             # Leave empty for all cameras
 ```
 
-Common MQTT broker locations:
+**Common MQTT broker locations:**
 - Home Assistant: `mqtt://homeassistant.local:1883`
 - Standalone Mosquitto: `mqtt://192.168.1.X:1883`
 - Same host as bridge: `mqtt://localhost:1883`
 
-3. **Start the bridge:**
+**Note:** You do NOT need to configure:
+- ~~`FRIGATE_URL`~~ - Auto-configured by app
+- ~~`EXTERNAL_FRIGATE_URL`~~ - Auto-configured by app
+- ~~`FRIGATE_JWT_TOKEN`~~ - Auto-configured by app
+
+The mobile app automatically sends these when you register!
+
+#### 3. Start the Bridge
 
 ```bash
 docker compose up -d
 ```
 
-The image will be automatically pulled from GitHub Container Registry.
-
-4. **Check status:**
+**Check it's running:**
 
 ```bash
 # View logs
 docker compose logs -f
 
-# Check health
+# Check health endpoint
 curl http://localhost:3002/health
 ```
 
-5. **Register your phone in Aviant app:**
+You should see:
+```
+✓ Bridge listening on port 3002
+✓ MQTT connected to mqtt://192.168.1.100:1883
+✓ Subscribed to frigate/events
+```
 
-- Open Aviant app
-- Go to Settings → Notifications
-- Select "Local Bridge"
-- Enter Bridge URL: `http://YOUR_SERVER_IP:3002`
-- Tap "Register Device"
-- Your push token will be sent to the bridge
+### Register Your Phone (Auto-Configuration Magic!)
+
+**In the Aviant mobile app:**
+
+1. Open **Settings → Notifications**
+2. Select **"Local Bridge"** method
+3. Enter Bridge URL: `http://YOUR_SERVER_IP:3002`
+4. Tap **"Register Device"**
+
+**What happens automatically:**
+- ✓ App sends your push token to bridge
+- ✓ App sends your Frigate JWT token (from login)
+- ✓ App sends your external Frigate URL (for thumbnails)
+- ✓ Bridge stores everything in `./data/config.json`
+- ✓ Configuration Status shows "Ready" and "Configured"
+
+**Done!** You'll now receive push notifications when Frigate detects activity
 
 #### Option 2: Build Locally (Development)
 
@@ -108,19 +130,25 @@ docker run -d --env-file .env -p 3002:3002 aviant-push-bridge
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MQTT_HOST` | `mqtt://localhost:1883` | MQTT broker URL |
-| `MQTT_USERNAME` | - | MQTT username (if required) |
-| `MQTT_PASSWORD` | - | MQTT password (if required) |
-| `MQTT_TOPIC` | `frigate/events` | MQTT topic to subscribe to |
-| `FRIGATE_URL` | `http://localhost:5000` | Internal Frigate server URL (for MQTT connection) |
-| `EXTERNAL_FRIGATE_URL` | Same as `FRIGATE_URL` | **External Frigate URL** - Must be publicly accessible from mobile devices for thumbnail images (e.g., `https://cctv.example.com`) |
-| `BRIDGE_PORT` | `3002` | HTTP server port |
-| `NOTIFICATION_COOLDOWN` | `30` | Seconds between notifications per camera |
-| `FILTER_LABELS` | - | Comma-separated labels (e.g., `person,car,dog`) |
-| `FILTER_CAMERAS` | - | Comma-separated cameras (e.g., `driveway,backyard`) |
-| `AUTH_TOKEN` | - | Optional API authentication token (recommended for public exposure) |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| **MQTT Configuration** ||||
+| `MQTT_HOST` | ✅ Yes | `mqtt://localhost:1883` | MQTT broker URL |
+| `MQTT_USERNAME` | No | - | MQTT username (if broker requires auth) |
+| `MQTT_PASSWORD` | No | - | MQTT password (if broker requires auth) |
+| `MQTT_TOPIC` | No | `frigate/events` | MQTT topic to subscribe to |
+| **Bridge Settings** ||||
+| `BRIDGE_PORT` | No | `3002` | HTTP server port |
+| `NOTIFICATION_COOLDOWN` | No | `30` | Seconds between notifications per camera |
+| **Filters (Optional)** ||||
+| `FILTER_LABELS` | No | - | Comma-separated labels (e.g., `person,car,dog`) |
+| `FILTER_CAMERAS` | No | - | Comma-separated cameras (e.g., `driveway,backyard`) |
+| **Auto-Configured by App** ||||
+| `FRIGATE_JWT_TOKEN` | 🤖 Auto | - | **Sent automatically by app** when you register. Can manually override if needed. |
+| `EXTERNAL_FRIGATE_URL` | 🤖 Auto | - | **Sent automatically by app** from your Frigate server URL. Used for notification thumbnails. |
+| `FRIGATE_URL` | 🤖 Auto | `http://localhost:5000` | **Sent automatically by app**. Internal Frigate URL (usually same as external). |
+
+**Note:** Variables marked with 🤖 are automatically configured by the Aviant mobile app when you register your device. The app sends your Frigate credentials from your login session, so you don't need to copy/paste JWT tokens manually!
 
 ### Filtering Examples
 
@@ -142,24 +170,78 @@ docker run -d --env-file .env -p 3002:3002 aviant-push-bridge
 
 ## API Endpoints
 
+All endpoints are automatically called by the Aviant mobile app. Manual usage is optional.
+
 ### Health Check
 ```bash
 GET http://localhost:3002/health
 ```
 
-Returns bridge status, uptime, and statistics.
+Returns bridge status, uptime, registered tokens, and configuration status.
 
-### Register Push Token
+**Response:**
+```json
+{
+  "status": "healthy",
+  "uptime": 86400,
+  "registeredTokens": 2,
+  "mqttConnected": true,
+  "configured": {
+    "frigateToken": true,
+    "externalUrl": true
+  }
+}
+```
+
+### Register Device & Auto-Configure
 ```bash
 POST http://localhost:3002/register
 Content-Type: application/json
 
 {
-  "pushToken": "ExponentPushToken[xxxxxxxxxxxxxx]"
+  "pushToken": "ExponentPushToken[xxxxxxxxxxxxxx]",
+  "deviceId": "unique-device-id",
+  "deviceName": "John's iPhone",
+  "frigateUrl": "https://cctv.example.com",
+  "frigateToken": "eyJhbGc...",
+  "platform": "ios"
 }
 ```
 
-Automatically called by Aviant app.
+**Automatically called by Aviant app** when you tap "Register Device".
+
+This single endpoint:
+1. Registers your push token
+2. Auto-configures Frigate credentials (JWT token)
+3. Auto-configures external URL for thumbnails
+4. Stores everything in `./data/config.json`
+
+### Sync Configuration (Auto)
+```bash
+POST http://localhost:3002/configure
+Content-Type: application/json
+
+{
+  "frigateUrl": "https://cctv.example.com",
+  "frigateToken": "eyJhbGc...",
+  "externalFrigateUrl": "https://cctv.example.com"
+}
+```
+
+**Automatically called by Aviant app** during registration. You can also call manually to update credentials without re-registering.
+
+### Check Configuration Status
+```bash
+GET http://localhost:3002/config/status
+```
+
+Returns which credentials are configured:
+```json
+{
+  "frigateTokenConfigured": true,
+  "externalFrigateUrlConfigured": true
+}
+```
 
 ### Unregister Push Token
 ```bash
@@ -175,6 +257,8 @@ Content-Type: application/json
 ```bash
 GET http://localhost:3002/tokens
 ```
+
+Shows all registered devices (useful for debugging).
 
 ## Troubleshooting
 

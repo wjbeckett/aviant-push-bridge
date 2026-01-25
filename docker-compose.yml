@@ -3,44 +3,32 @@ version: '3.8'
 services:
   aviant-push-bridge:
     # Use pre-built image from GitHub Container Registry
-    # Automatically pulls latest version on 'docker compose pull'
     image: ghcr.io/your-username/aviant-push-bridge:latest
     container_name: aviant-push-bridge
     restart: unless-stopped
     ports:
       - "3002:3002"
+    volumes:
+      # Persist configuration and push token registrations
+      - ./data:/app/data
     environment:
-      # MQTT Broker (update with your MQTT broker details)
+      # ============================================
+      # REQUIRED: MQTT Broker Connection
+      # ============================================
       - MQTT_HOST=mqtt://192.168.1.100:1883
       - MQTT_USERNAME=
       - MQTT_PASSWORD=
       - MQTT_TOPIC=frigate/events
       
-      # Frigate server (internal URL for MQTT connection)
-      - FRIGATE_URL=http://192.168.1.100:5000
-      
-      # External Frigate URL (must be accessible from mobile devices for images)
-      # Use your public/external URL
-      - EXTERNAL_FRIGATE_URL=https://frigate.example.com
-      
-      # Bridge settings
+      # ============================================
+      # OPTIONAL: Bridge Settings
+      # ============================================
       - BRIDGE_PORT=3002
-      
-      # Notification settings
       - NOTIFICATION_COOLDOWN=30
       
-      # Filters (optional - leave empty for all)
+      # ============================================
+      # OPTIONAL: Event Filters
+      # ============================================
+      # Comma-separated, leave empty for all
       - FILTER_LABELS=
       - FILTER_CAMERAS=
-    
-    # If running on same host as Frigate/MQTT, can use host network
-    # network_mode: host
-    
-    # Or connect to existing network
-    # networks:
-    #   - frigate_network
-
-# If using external network (e.g., with Frigate)
-# networks:
-#   frigate_network:
-#     external: true

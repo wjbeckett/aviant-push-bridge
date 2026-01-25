@@ -29,8 +29,95 @@ const config = {
   },
 };
 
-// Store push tokens (in production, use database)
-const pushTokens = new Set();
+// Store push tokens and configuration with persistent storage
+const fs = require('fs');
+const path = require('path');
+
+const DATA_DIR = path.join(__dirname, '../data');
+const TOKENS_FILE = path.join(DATA_DIR, 'tokens.json');
+const DEVICES_FILE = path.join(DATA_DIR, 'devices.json');
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+
+// Ensure data directory exists
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Load tokens from file
+let pushTokens = new Set();
+try {
+  if (fs.existsSync(TOKENS_FILE)) {
+    const data = fs.readFileSync(TOKENS_FILE, 'utf8');
+    const tokens = JSON.parse(data);
+    pushTokens = new Set(tokens);
+    console.log(`[Bridge] Loaded ${pushTokens.size} token(s) from persistent storage`);
+  }
+} catch (err) {
+  console.error('[Bridge] Error loading tokens:', err.message);
+}
+
+// Load devices from file (map of token -> device metadata)
+let devices = new Map();
+try {
+  if (fs.existsSync(DEVICES_FILE)) {
+    const data = fs.readFileSync(DEVICES_FILE, 'utf8');
+    const devicesArray = JSON.parse(data);
+    devices = new Map(devicesArray);
+    console.log(`[Bridge] Loaded ${devices.size} device(s) from persistent storage`);
+  }
+} catch (err) {
+  console.error('[Bridge] Error loading devices:', err.message);
+}
+
+// Load configuration from file
+let bridgeConfig = {
+  frigateJwtToken: null,
+  externalFrigateUrl: process.env.EXTERNAL_FRIGATE_URL || config.frigate.url,
+  notifications: {
+    cooldown: parseInt(process.env.NOTIFICATION_COOLDOWN || '30'),
+    filterLabels: process.env.FILTER_LABELS?.split(',').filter(Boolean) || [],
+    filterCameras: process.env.FILTER_CAMERAS?.split(',').filter(Boolean) || [],
+  },
+};
+
+try {
+  if (fs.existsSync(CONFIG_FILE)) {
+    const data = fs.readFileSync(CONFIG_FILE, 'utf8');
+    const savedConfig = JSON.parse(data);
+    bridgeConfig = { ...bridgeConfig, ...savedConfig };
+    console.log(`[Bridge] Loaded configuration from persistent storage`);
+    if (bridgeConfig.frigateJwtToken) {
+      console.log(`[Bridge] Frigate JWT token configured: ${bridgeConfig.frigateJwtToken.substring(0, 20)}...`);
+    }
+  }
+} catch (err) {
+  console.error('[Bridge] Error loading config:', err.message);
+}
+
+// Save functions
+function saveTokens() {
+  try {
+    fs.writeFileSync(TOKENS_FILE, JSON.stringify(Array.from(pushTokens), null, 2));
+  } catch (err) {
+    console.error('[Bridge] Error saving tokens:', err.message);
+  }
+}
+
+function saveDevices() {
+  try {
+    fs.writeFileSync(DEVICES_FILE, JSON.stringify(Array.from(devices.entries()), null, 2));
+  } catch (err) {
+    console.error('[Bridge] Error saving devices:', err.message);
+  }
+}
+
+function saveConfig() {
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(bridgeConfig, null, 2));
+  } catch (err) {
+    console.error('[Bridge] Error saving config:', err.message);
+  }
+}
 
 // Cooldown tracking to prevent notification spam
 const notificationCooldowns = new Map();
@@ -88,22 +175,38 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Register push token endpoint
+// Register push token endpoint (with optional device metadata)
 app.post('/register', (req, res) => {
-  const { pushToken } = req.body;
+  const { pushToken, deviceName, deviceModel, platform } = req.body;
   
   if (!pushToken || !pushToken.startsWith('ExponentPushToken[')) {
     return res.status(400).json({ error: 'Invalid push token format' });
   }
   
+  // Store device metadata
+  const deviceInfo = {
+    token: pushToken,
+    name: deviceName || 'Unknown Device',
+    model: deviceModel || 'Unknown Model',
+    platform: platform || 'Unknown',
+    registeredAt: new Date().toISOString(),
+    lastSeen: new Date().toISOString(),
+  };
+  
   pushTokens.add(pushToken);
-  console.log(`[Bridge] Registered push token: ${pushToken.substring(0, 30)}...`);
-  console.log(`[Bridge] Total registered tokens: ${pushTokens.size}`);
+  devices.set(pushToken, deviceInfo);
+  
+  saveTokens();
+  saveDevices();
+  
+  console.log(`[Bridge] Registered device: ${deviceInfo.name} (${deviceInfo.model})`);
+  console.log(`[Bridge] Total registered devices: ${pushTokens.size}`);
   
   res.json({ 
     success: true, 
-    message: 'Push token registered successfully',
-    totalTokens: pushTokens.size,
+    message: 'Device registered successfully',
+    totalDevices: pushTokens.size,
+    device: deviceInfo,
   });
 });
 
@@ -113,10 +216,13 @@ app.post('/unregister', (req, res) => {
   
   if (pushTokens.has(pushToken)) {
     pushTokens.delete(pushToken);
-    console.log(`[Bridge] Unregistered push token: ${pushToken.substring(0, 30)}...`);
-    res.json({ success: true, message: 'Push token unregistered' });
+    devices.delete(pushToken);
+    saveTokens();
+    saveDevices();
+    console.log(`[Bridge] Unregistered device: ${pushToken.substring(0, 30)}...`);
+    res.json({ success: true, message: 'Device unregistered successfully' });
   } else {
-    res.status(404).json({ error: 'Push token not found' });
+    res.status(404).json({ error: 'Device not found' });
   }
 });
 
@@ -126,6 +232,129 @@ app.get('/tokens', (req, res) => {
     count: pushTokens.size,
     tokens: Array.from(pushTokens).map(t => `${t.substring(0, 30)}...`),
   });
+});
+
+// === DEVICE MANAGEMENT ENDPOINTS ===
+
+// List all registered devices with metadata
+app.get('/devices', (req, res) => {
+  const devicesList = Array.from(devices.values()).map(device => ({
+    ...device,
+    token: `${device.token.substring(0, 30)}...`, // Redact full token
+  }));
+  
+  res.json({
+    count: devices.size,
+    devices: devicesList,
+  });
+});
+
+// Remove a specific device by token
+app.delete('/devices/:token', (req, res) => {
+  const { token } = req.params;
+  
+  // Find device by partial token match (since we redact in UI)
+  let fullToken = null;
+  for (const [key] of devices) {
+    if (key === token || key.startsWith(token.substring(0, 30))) {
+      fullToken = key;
+      break;
+    }
+  }
+  
+  if (fullToken && pushTokens.has(fullToken)) {
+    pushTokens.delete(fullToken);
+    devices.delete(fullToken);
+    saveTokens();
+    saveDevices();
+    console.log(`[Bridge] Removed device: ${fullToken.substring(0, 30)}...`);
+    res.json({ success: true, message: 'Device removed successfully' });
+  } else {
+    res.status(404).json({ error: 'Device not found' });
+  }
+});
+
+// === CONFIGURATION MANAGEMENT ENDPOINTS ===
+
+// Get current bridge configuration
+app.get('/config', (req, res) => {
+  res.json({
+    frigateJwtToken: bridgeConfig.frigateJwtToken ? '***configured***' : null,
+    externalFrigateUrl: bridgeConfig.externalFrigateUrl,
+    notifications: bridgeConfig.notifications,
+  });
+});
+
+// Update Frigate JWT token (sent from mobile app)
+app.post('/config/frigate-token', (req, res) => {
+  const { token, externalUrl } = req.body;
+  
+  if (!token || typeof token !== 'string' || token.length < 20) {
+    return res.status(400).json({ error: 'Invalid JWT token format' });
+  }
+  
+  bridgeConfig.frigateJwtToken = token;
+  
+  if (externalUrl) {
+    bridgeConfig.externalFrigateUrl = externalUrl;
+  }
+  
+  saveConfig();
+  
+  console.log(`[Bridge] Frigate JWT token updated: ${token.substring(0, 20)}...`);
+  if (externalUrl) {
+    console.log(`[Bridge] External Frigate URL updated: ${externalUrl}`);
+  }
+  
+  res.json({ 
+    success: true, 
+    message: 'Frigate configuration updated successfully',
+    configured: true,
+  });
+});
+
+// Get Frigate token status
+app.get('/config/frigate-token', (req, res) => {
+  res.json({
+    configured: !!bridgeConfig.frigateJwtToken,
+    externalFrigateUrl: bridgeConfig.externalFrigateUrl,
+  });
+});
+
+// Update notification filters
+app.put('/config/notifications', (req, res) => {
+  const { cooldown, filterLabels, filterCameras } = req.body;
+  
+  if (cooldown !== undefined) {
+    bridgeConfig.notifications.cooldown = parseInt(cooldown);
+  }
+  
+  if (filterLabels !== undefined) {
+    bridgeConfig.notifications.filterLabels = Array.isArray(filterLabels) 
+      ? filterLabels.filter(Boolean) 
+      : [];
+  }
+  
+  if (filterCameras !== undefined) {
+    bridgeConfig.notifications.filterCameras = Array.isArray(filterCameras) 
+      ? filterCameras.filter(Boolean) 
+      : [];
+  }
+  
+  saveConfig();
+  
+  console.log(`[Bridge] Notification filters updated:`, bridgeConfig.notifications);
+  
+  res.json({ 
+    success: true, 
+    message: 'Notification filters updated successfully',
+    notifications: bridgeConfig.notifications,
+  });
+});
+
+// Get notification filters
+app.get('/config/notifications', (req, res) => {
+  res.json(bridgeConfig.notifications);
 });
 
 // Start Express server
@@ -190,16 +419,16 @@ client.on('message', async (topic, message) => {
     }
     
     // Filter by labels if configured
-    if (config.notifications.filterLabels.length > 0) {
-      if (!config.notifications.filterLabels.includes(event.after?.label)) {
+    if (bridgeConfig.notifications.filterLabels.length > 0) {
+      if (!bridgeConfig.notifications.filterLabels.includes(event.after?.label)) {
         console.log(`[Filter] Skipping event - label '${event.after?.label}' not in filter`);
         return;
       }
     }
     
     // Filter by cameras if configured
-    if (config.notifications.filterCameras.length > 0) {
-      if (!config.notifications.filterCameras.includes(event.after?.camera)) {
+    if (bridgeConfig.notifications.filterCameras.length > 0) {
+      if (!bridgeConfig.notifications.filterCameras.includes(event.after?.camera)) {
         console.log(`[Filter] Skipping event - camera '${event.after?.camera}' not in filter`);
         return;
       }
@@ -210,7 +439,7 @@ client.on('message', async (topic, message) => {
     const lastNotification = notificationCooldowns.get(cooldownKey);
     const now = Date.now();
     
-    if (lastNotification && (now - lastNotification) < config.notifications.cooldown * 1000) {
+    if (lastNotification && (now - lastNotification) < bridgeConfig.notifications.cooldown * 1000) {
       console.log(`[Cooldown] Skipping notification for ${cooldownKey} (cooldown active)`);
       return;
     }
@@ -242,14 +471,18 @@ async function sendPushNotifications(event) {
   // Send Unix timestamp to mobile app so it can format in user's local timezone
   const startTime = event.after?.start_time || Math.floor(Date.now() / 1000);
   
-  // Build thumbnail URL from Frigate event ID
-  // Use EXTERNAL Frigate URL (not internal localhost)
-  // Important: This must be the publicly accessible URL
+  // Build thumbnail URL with JWT token authentication
+  // Frigate supports ?token=xxx query parameter for authentication
   const eventId = event.after?.id;
-  const externalFrigateUrl = process.env.EXTERNAL_FRIGATE_URL || config.frigate.url;
-  const thumbnailUrl = eventId 
-    ? `${externalFrigateUrl}/api/events/${eventId}/thumbnail.jpg`
-    : null;
+  
+  let thumbnailUrl = null;
+  if (eventId) {
+    thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/events/${eventId}/thumbnail.jpg`;
+    // Add JWT token if configured (allows auth without custom headers)
+    if (bridgeConfig.frigateJwtToken) {
+      thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
+    }
+  }
   
   // Capitalize label for cleaner display
   const capitalizedLabel = label.charAt(0).toUpperCase() + label.slice(1);
