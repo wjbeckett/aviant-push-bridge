@@ -493,6 +493,7 @@ async function processReviewMessage(review) {
   const startTime = review.after?.start_time || review.start_time;
   const objects = review.after?.data?.objects || review.data?.objects || [];
   const zones = review.after?.data?.zones || review.data?.zones || [];
+  const detections = review.after?.data?.detections || review.data?.detections || [];
   
   // Filter by severity (default: only alerts)
   if (bridgeConfig.notifications.severityFilter !== 'all') {
@@ -603,14 +604,21 @@ async function sendReviewNotification(review) {
     obj.charAt(0).toUpperCase() + obj.slice(1)
   ).join(', ');
   
-  // Build thumbnail URL for review
+  // Build thumbnail URL using event ID (not review ID)
+  // Reviews contain a "detections" array with event IDs - use the first one
+  // Event thumbnails are the standard way to get images with ?token= auth
   let thumbnailUrl = null;
-  if (reviewId) {
-    // Reviews use a different thumbnail endpoint
-    thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/review/${reviewId}/thumbnail.jpg`;
+  const firstEventId = detections.length > 0 ? detections[0] : null;
+  
+  if (firstEventId && bridgeConfig.externalFrigateUrl) {
+    // Use /api/events/:event_id/thumbnail.jpg (standard endpoint)
+    thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/events/${firstEventId}/thumbnail.jpg`;
     if (bridgeConfig.frigateJwtToken) {
       thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
     }
+    console.log(`[Push] Using event thumbnail URL (event_id: ${firstEventId})`);
+  } else if (reviewId) {
+    console.log(`[Push] ⚠️  No event IDs in review ${reviewId}, cannot fetch thumbnail`);
   }
   
   // Format camera name
@@ -660,11 +668,13 @@ async function sendReviewNotification(review) {
         timestamp: startTime,
         type: type === 'update' ? 'frigate_review_update' : 'frigate_review',
         thumbnailUrl: thumbnailUrl,
+        eventId: firstEventId, // Include event ID for app use
         action: 'live', // Default action when tapped
       },
     };
     
-    // Add thumbnail image if available
+    // Add thumbnail image attachment for OS notifications
+    // Using event thumbnail endpoint with JWT token authentication
     if (thumbnailUrl) {
       message.image = thumbnailUrl; // Android
       message.ios = {
@@ -672,7 +682,7 @@ async function sendReviewNotification(review) {
       };
     }
     
-    // Add action buttons for Android
+    // Add action buttons
     message.android = {
       sound: 'default',
       priority: severity === 'alert' ? 'high' : 'normal',
@@ -685,8 +695,13 @@ async function sendReviewNotification(review) {
   // Send to Expo Push API
   try {
     console.log(`[Push] Sending ${messages.length} notification(s) for review ${reviewId} (${severity})`);
-    console.log(`[Push] Thumbnail URL: ${thumbnailUrl || 'none'}`);
     console.log(`[Push] Using templates: title="${messages[0].title}", body="${messages[0].body}"`);
+    if (thumbnailUrl) {
+      console.log(`[Push] Thumbnail URL: ${thumbnailUrl}`);
+      console.log(`[Push] Image attachment: Included for OS notification`);
+    } else {
+      console.log(`[Push] No thumbnail available (no event IDs in review)`);
+    }
     
     const response = await axios.post('https://exp.host/--/api/v2/push/send', messages, {
       headers: {

@@ -262,6 +262,32 @@ aviant://camera/{cameraName}?action=live|timeline&time={timestamp}
 
 You can also use deep links from other automation tools (Home Assistant, Tasker, etc.).
 
+### Notification Image Attachments ✅
+
+**Images ARE included in OS notifications!**
+
+The bridge automatically includes thumbnail images in notifications using Frigate's event API:
+
+**How it works:**
+1. Reviews contain a list of event IDs (tracked objects)
+2. Bridge uses first event ID to fetch thumbnail: `/api/events/:event_id/thumbnail.jpg`
+3. JWT token authentication via `?token=` query parameter
+4. Expo's servers fetch the image from your public Frigate URL
+5. Notification displays with image preview
+
+**Requirements:**
+- ✅ Frigate accessible via HTTPS (you already have this)
+- ✅ JWT token authentication (configured automatically by app)
+- ✅ Snapshots enabled in Frigate (default)
+
+**What you get:**
+- ✅ Thumbnail images in OS notifications
+- ✅ Custom notification templates
+- ✅ Action buttons (View Live / View Recording)
+- ✅ Deep linking to camera/timeline
+- ✅ Secure (JWT token authentication)
+
+**See detailed explanation:** [NOTIFICATION_IMAGES_SOLUTION.md](NOTIFICATION_IMAGES_SOLUTION.md)
 ## API Endpoints
 
 All endpoints are automatically called by the Aviant mobile app. Manual usage is optional.
