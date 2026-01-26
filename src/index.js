@@ -542,6 +542,7 @@ async function processReviewMessage(review) {
     severity,
     objects,
     zones,
+    detections, // Pass detections array for thumbnail URL
     startTime,
     type: review.type, // 'new' or 'update'
   });
@@ -596,7 +597,7 @@ async function sendReviewNotification(review) {
     return;
   }
   
-  const { reviewId, camera, severity, objects, zones, startTime, type } = review;
+  const { reviewId, camera, severity, objects, zones, detections, startTime, type } = review;
   
   // Format objects list for notification title
   const objectsList = objects.length > 0 ? objects.join(', ') : 'Activity';
