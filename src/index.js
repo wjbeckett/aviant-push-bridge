@@ -613,21 +613,44 @@ async function sendReviewNotification(review) {
     }
   }
   
-  // Add severity indicator to title
-  const severityEmoji = severity === 'alert' ? '🚨' : '👀';
-  const titlePrefix = severity === 'alert' ? 'Alert' : 'Detection';
-  
   // Format camera name
   const formattedCamera = camera.replace(/_/g, ' ');
   
-  // Prepare notification messages for all tokens
+  // Helper function to format template with event data
+  const formatTemplate = (template, eventData) => {
+    return template
+      .replace(/{label}/g, eventData.capitalizedLabel)
+      .replace(/{camera}/g, eventData.cameraFormatted)
+      .replace(/{zones}/g, eventData.zones || 'Unknown')
+      .replace(/{time}/g, eventData.time)
+      .replace(/{score}/g, eventData.scoreFormatted);
+  };
+  
+  // Prepare data for template formatting
+  const templateData = {
+    capitalizedLabel: capitalizedObjects,
+    cameraFormatted: formattedCamera,
+    zones: zones.length > 0 ? zones.join(', ') : '',
+    time: new Date(startTime * 1000).toLocaleTimeString(),
+    scoreFormatted: '', // Review segments don't have scores
+  };
+  
+  // Prepare notification messages for all tokens (with per-device templates)
   const messages = Array.from(pushTokens).map(token => {
+    // Get device-specific templates (or use defaults)
+    const device = devices.get(token);
+    const templates = device?.templates || {
+      title: '{label} detected on {camera}',
+      body: 'Motion in {zones} at {time}',
+    };
+    
     const message = {
       to: token,
       sound: 'default',
-      title: `${titlePrefix}: ${capitalizedObjects}`,
-      body: `${formattedCamera}${zones.length > 0 ? ` (${zones.join(', ')})` : ''}`,
+      title: formatTemplate(templates.title, templateData),
+      body: formatTemplate(templates.body, templateData),
       priority: severity === 'alert' ? 'high' : 'normal',
+      categoryId: 'frigate_detection', // For iOS notification categories
       data: {
         reviewId: reviewId,
         camera: camera,
@@ -637,6 +660,7 @@ async function sendReviewNotification(review) {
         timestamp: startTime,
         type: type === 'update' ? 'frigate_review_update' : 'frigate_review',
         thumbnailUrl: thumbnailUrl,
+        action: 'live', // Default action when tapped
       },
     };
     
@@ -648,11 +672,22 @@ async function sendReviewNotification(review) {
       };
     }
     
+    // Add action buttons for Android
+    message.android = {
+      sound: 'default',
+      priority: severity === 'alert' ? 'high' : 'normal',
+      channelId: 'frigate-detections',
+    };
+    
     return message;
   });
   
   // Send to Expo Push API
   try {
+    console.log(`[Push] Sending ${messages.length} notification(s) for review ${reviewId} (${severity})`);
+    console.log(`[Push] Thumbnail URL: ${thumbnailUrl || 'none'}`);
+    console.log(`[Push] Using templates: title="${messages[0].title}", body="${messages[0].body}"`);
+    
     const response = await axios.post('https://exp.host/--/api/v2/push/send', messages, {
       headers: {
         'Content-Type': 'application/json',
@@ -660,18 +695,23 @@ async function sendReviewNotification(review) {
     });
     
     stats.notificationsSent += messages.length;
-    console.log(`[Push] Sent ${messages.length} notification(s) for review ${reviewId} (${severity})`);
+    console.log(`[Push] ✅ Sent ${messages.length} notification(s)${thumbnailUrl ? ' with image attachment' : ''}`);
     
     // Log any errors from Expo
     if (response.data && response.data.data) {
       response.data.data.forEach((result, index) => {
         if (result.status === 'error') {
-          console.error(`[Push] Error sending to token ${index + 1}:`, result.message);
+          console.error(`[Push] ❌ Error sending to token ${index + 1}:`, result.message);
+        } else if (result.status === 'ok') {
+          console.log(`[Push] ✅ Token ${index + 1}: ${result.id}`);
         }
       });
     }
   } catch (error) {
-    console.error('[Push] Failed to send notifications:', error.message);
+    console.error('[Push] ❌ Failed to send notifications:', error.message);
+    if (error.response) {
+      console.error('[Push] Response:', error.response.data);
+    }
   }
 }
 
