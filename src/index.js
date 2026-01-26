@@ -677,18 +677,32 @@ async function sendReviewNotification(review) {
     // Add thumbnail image attachment for OS notifications
     // Using event thumbnail endpoint with JWT token authentication
     if (thumbnailUrl) {
-      message.image = thumbnailUrl; // Android
+      message.image = thumbnailUrl; // Android image
       message.ios = {
-        attachments: [{ url: thumbnailUrl }], // iOS
+        attachments: [{ url: thumbnailUrl }], // iOS image
       };
     }
     
-    // Add action buttons
+    // Add platform-specific action buttons
     message.android = {
       sound: 'default',
       priority: severity === 'alert' ? 'high' : 'normal',
       channelId: 'frigate-detections',
+      // Action buttons for Android
+      actions: [
+        {
+          title: '📺 View Live',
+          pressAction: { id: 'view_live' },
+        },
+        {
+          title: '🎥 View Recording',
+          pressAction: { id: 'view_recording' },
+        },
+      ],
     };
+    
+    // iOS action buttons are handled via notification categories
+    // (already configured in app with categoryId: 'frigate_detection')
     
     return message;
   });
@@ -713,16 +727,26 @@ async function sendReviewNotification(review) {
     stats.notificationsSent += messages.length;
     console.log(`[Push] ✅ Sent ${messages.length} notification(s)${thumbnailUrl ? ' with image attachment' : ''}`);
     
-    // Log any errors from Expo
+    // Log any errors or warnings from Expo
     if (response.data && response.data.data) {
       response.data.data.forEach((result, index) => {
         if (result.status === 'error') {
           console.error(`[Push] ❌ Error sending to token ${index + 1}:`, result.message);
+          if (result.details) {
+            console.error(`[Push]    Details:`, JSON.stringify(result.details, null, 2));
+          }
         } else if (result.status === 'ok') {
           console.log(`[Push] ✅ Token ${index + 1}: ${result.id}`);
+          // Log any warnings (e.g., image fetch issues)
+          if (result.details && result.details.error) {
+            console.warn(`[Push] ⚠️  Warning for token ${index + 1}:`, result.details.error);
+          }
         }
       });
     }
+    
+    // Log the full response for debugging
+    console.log(`[Push] Full Expo response:`, JSON.stringify(response.data, null, 2));
   } catch (error) {
     console.error('[Push] ❌ Failed to send notifications:', error.message);
     if (error.response) {
