@@ -41,30 +41,11 @@ const NOTIFICATION_PROXY_TOKEN = process.env.NOTIFICATION_PROXY_TOKEN || 'aviant
 console.log('[Proxy] Using notification proxy:', NOTIFICATION_PROXY_URL);
 console.log('[Proxy] FCM credentials secured in Cloudflare Worker (not in bridge)');
 
-// Legacy: Firebase Admin SDK (optional fallback)
-let firebaseApp = null;
-let fcmAvailable = false;
-
-// Check if user wants to use legacy direct FCM (not recommended)
-if (process.env.USE_LEGACY_FCM === 'true' && process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-  try {
-    console.log('[FCM] Legacy mode: Using direct FCM with service account');
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-    
-    firebaseApp = admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-    fcmAvailable = true;
-    
-    console.log('[FCM] ✅ Firebase Admin SDK initialized (legacy mode)');
-    console.log('[FCM] Project ID:', serviceAccount.project_id);
-  } catch (error) {
-    console.error('[FCM] ❌ Failed to initialize Firebase Admin SDK:', error.message);
-    fcmAvailable = false;
-  }
-} else {
-  console.log('[Proxy] Using secure notification proxy (recommended)');
-}
+// Firebase Admin SDK is NOT initialized on the bridge
+// All notifications are sent via the secure Cloudflare Worker proxy
+// This keeps FCM credentials secure and separate from the bridge
+console.log('[Bridge] Notification proxy mode: FCM credentials secured in Cloudflare Worker');
+console.log('[Bridge] Bridge does NOT have direct access to FCM credentials (secure by design)');
 
 // Store push tokens and configuration with persistent storage
 
@@ -307,35 +288,39 @@ app.post('/test-notification', async (req, res) => {
     const isFCMToken = device.tokenType === 'fcm' || (!pushToken.startsWith('ExponentPushToken['));
     
     if (isFCMToken) {
-      // Send via FCM
-      const message = {
+      // Send via Notification Proxy (Cloudflare Worker with FCM credentials)
+      console.log('[Bridge] Using notification proxy for FCM token');
+      
+      const proxyPayload = {
         token: pushToken,
+        title: 'Test Notification',
+        body: 'This is a test notification from Aviant Bridge',
         data: {
-          title: 'Test Notification',
-          body: 'This is a test notification from Aviant Bridge',
           notificationType: 'test',
           timestamp: Date.now().toString(),
         },
-        android: {
-          priority: 'high',
-        },
-        apns: {
-          headers: {
-            'apns-priority': '10',
-          },
-        },
+        priority: 'high',
       };
       
-      const response = await admin.messaging().send(message);
-      console.log('[Bridge] ✅ Test FCM notification sent:', response);
+      const response = await axios.post(NOTIFICATION_PROXY_URL, proxyPayload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${NOTIFICATION_PROXY_TOKEN}`,
+        },
+        timeout: 10000,
+      });
+      
+      console.log('[Bridge] ✅ Test notification sent via proxy:', response.data);
       
       return res.json({ 
         success: true, 
-        message: 'Test notification sent via FCM',
-        messageId: response,
+        message: 'Test notification sent via proxy',
+        result: response.data,
       });
     } else {
-      // Send via Expo Push
+      // Send via Expo Push (for legacy tokens)
+      console.log('[Bridge] Using Expo Push Service for legacy token');
+      
       const expoPushMessage = {
         to: pushToken,
         sound: 'default',
@@ -344,26 +329,27 @@ app.post('/test-notification', async (req, res) => {
         data: { notificationType: 'test' },
       };
       
-      const expoPushResponse = await fetch('https://exp.host/--/api/v2/push/send', {
-        method: 'POST',
+      const expoPushResponse = await axios.post('https://exp.host/--/api/v2/push/send', expoPushMessage, {
         headers: {
           'Accept': 'application/json',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(expoPushMessage),
+        timeout: 10000,
       });
       
-      const result = await expoPushResponse.json();
-      console.log('[Bridge] ✅ Test Expo notification sent:', result);
+      console.log('[Bridge] ✅ Test Expo notification sent:', expoPushResponse.data);
       
       return res.json({ 
         success: true, 
         message: 'Test notification sent via Expo',
-        result,
+        result: expoPushResponse.data,
       });
     }
   } catch (error) {
     console.error('[Bridge] ❌ Failed to send test notification:', error.message);
+    if (error.response) {
+      console.error('[Bridge] Proxy response:', error.response.status, error.response.data);
+    }
     return res.status(500).json({ 
       error: 'Failed to send test notification',
       details: error.message,
@@ -792,36 +778,10 @@ async function sendFCMNotification(fcmToken, notificationData) {
       }
     }
 
-    // Legacy: Direct FCM (fallback, requires service account)
-    console.log('[FCM] Sending notification via direct FCM (legacy mode)');
-    
-    const message = {
-      token: fcmToken,
-      data: {
-        title: title || 'Frigate Alert',
-        body: body || 'Motion detected',
-        thumbnailUrl: thumbnailUrl || '',
-        jwtToken: jwtToken || '',
-        camera: camera || '',
-        reviewId: reviewId || '',
-        eventId: eventId || '',
-        timestamp: timestamp?.toString() || '',
-        severity: severity || 'detection',
-        notificationType: 'frigate_detection',
-      },
-      android: {
-        priority: severity === 'alert' ? 'high' : 'normal',
-      },
-      apns: {
-        headers: {
-          'apns-priority': severity === 'alert' ? '10' : '5',
-        },
-      },
-    };
-
-    const response = await admin.messaging().send(message);
-    console.log('[FCM] ✅ Message sent successfully:', response);
-    return true;
+    // No direct FCM fallback - proxy is required
+    console.error('[Notification] ❌ Proxy failed and no fallback configured');
+    console.error('[Notification] Please ensure your Cloudflare Worker proxy is running');
+    return false;
 
   } catch (error) {
     console.error('[Notification] ❌ Failed to send:', error.message);
