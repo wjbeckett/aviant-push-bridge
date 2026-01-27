@@ -35,10 +35,10 @@ const config = {
 
 // Notification Proxy Configuration
 // Uses Cloudflare Worker to send notifications (FCM credentials secured there)
-const NOTIFICATION_PROXY_URL = process.env.NOTIFICATION_PROXY_URL || 'https://notify.aviant.app/send';
-const NOTIFICATION_PROXY_TOKEN = process.env.NOTIFICATION_PROXY_TOKEN || 'aviant-default-token';
+const NOTIFICATION_PROXY_URL = process.env.NOTIFICATION_PROXY_URL || 'https://notify.aviant.app';
+let NOTIFICATION_PROXY_TOKEN = process.env.NOTIFICATION_PROXY_TOKEN || null; // Will be auto-generated on first run
 
-console.log('[Proxy] Using notification proxy:', NOTIFICATION_PROXY_URL);
+console.log('[Proxy] Notification proxy:', NOTIFICATION_PROXY_URL);
 console.log('[Proxy] FCM credentials secured in Cloudflare Worker (not in bridge)');
 
 // Firebase Admin SDK is NOT initialized on the bridge
@@ -53,6 +53,7 @@ const DATA_DIR = path.join(__dirname, '../data');
 const TOKENS_FILE = path.join(DATA_DIR, 'tokens.json');
 const DEVICES_FILE = path.join(DATA_DIR, 'devices.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const API_KEY_FILE = path.join(DATA_DIR, 'api_key.json');
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -523,14 +524,197 @@ app.get('/config/notifications', (req, res) => {
   res.json(bridgeConfig.notifications);
 });
 
-// Start Express server
-app.listen(config.bridge.port, () => {
-  console.log(`[Bridge] HTTP server listening on port ${config.bridge.port}`);
-  console.log(`[Bridge] Health check: http://localhost:${config.bridge.port}/health`);
-});
+// === AUTO-REGISTRATION WITH NOTIFICATION PROXY ===
 
-// MQTT Client
-console.log(`[MQTT] Connecting to ${config.mqtt.host}...`);
+/**
+ * Generate unique bridge identifier based on machine fingerprint
+ * Uses MAC address + hostname for consistent ID across restarts
+ */
+function generateBridgeId() {
+  const os = require('os');
+  const crypto = require('crypto');
+  const networkInterfaces = os.networkInterfaces();
+  let macAddress = '';
+  
+  // Get first non-internal MAC address
+  for (const iface of Object.values(networkInterfaces)) {
+    for (const addr of iface) {
+      if (!addr.internal && addr.mac && addr.mac !== '00:00:00:00:00:00') {
+        macAddress = addr.mac;
+        break;
+      }
+    }
+    if (macAddress) break;
+  }
+  
+  // Fallback to random UUID if no MAC found
+  if (!macAddress) {
+    console.log('[Bridge] No MAC address found, using random UUID');
+    return crypto.randomUUID();
+  }
+  
+  // Hash MAC + hostname for privacy (don't expose raw MAC address)
+  const fingerprint = `${macAddress}-${os.hostname()}`;
+  const bridgeId = crypto.createHash('sha256').update(fingerprint).digest('hex').substring(0, 32);
+  
+  return bridgeId;
+}
+
+/**
+ * Auto-register bridge with notification proxy on first run
+ * Returns API key for authenticated notification sending
+ */
+async function ensureApiKey() {
+  const os = require('os');
+  
+  // If API key provided via environment variable, use it
+  if (process.env.NOTIFICATION_PROXY_TOKEN) {
+    console.log('[Proxy] Using API key from environment variable');
+    return process.env.NOTIFICATION_PROXY_TOKEN;
+  }
+  
+  // Check if we already have an API key
+  if (fs.existsSync(API_KEY_FILE)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(API_KEY_FILE, 'utf8'));
+      console.log('[Proxy] Using existing API key');
+      console.log('[Proxy] Bridge ID:', data.bridgeId);
+      console.log('[Proxy] Registered:', new Date(data.registeredAt).toLocaleString());
+      if (data.userEmail) {
+        console.log('[Proxy] Linked to account:', data.userEmail);
+      } else {
+        console.log('[Proxy] Anonymous mode (100 notifications/day limit)');
+        console.log('[Proxy] To upgrade: Visit https://notify.aviant.app/link?key=' + data.apiKey.substring(0, 16) + '...');
+      }
+      return data.apiKey;
+    } catch (error) {
+      console.error('[Proxy] Error reading API key file:', error.message);
+      console.log('[Proxy] Will re-register...');
+    }
+  }
+  
+  // First run - register with proxy
+  console.log('');
+  console.log('═══════════════════════════════════════════════════════════');
+  console.log('  FIRST RUN DETECTED - Registering with notification proxy');
+  console.log('═══════════════════════════════════════════════════════════');
+  console.log('');
+  
+  const bridgeId = generateBridgeId();
+  
+  try {
+    console.log('[Proxy] Contacting notification proxy:', NOTIFICATION_PROXY_URL);
+    console.log('[Proxy] Bridge ID:', bridgeId);
+    
+    const response = await axios.post(
+      `${NOTIFICATION_PROXY_URL}/register-bridge`,
+      {
+        bridgeId: bridgeId,
+        hostname: os.hostname(),
+        platform: os.platform(),
+        arch: os.arch(),
+        version: version,
+      },
+      { 
+        timeout: 15000,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+    
+    const apiKey = response.data.apiKey;
+    const isExisting = response.data.message?.includes('existing');
+    
+    // Save API key locally
+    const keyData = {
+      apiKey: apiKey,
+      bridgeId: bridgeId,
+      registeredAt: new Date().toISOString(),
+      hostname: os.hostname(),
+      platform: os.platform(),
+    };
+    
+    fs.writeFileSync(API_KEY_FILE, JSON.stringify(keyData, null, 2));
+    
+    console.log('');
+    console.log('╔═══════════════════════════════════════════════════════════╗');
+    console.log('║         REGISTRATION SUCCESSFUL                        ║');
+    console.log('╚═══════════════════════════════════════════════════════════╝');
+    console.log('');
+    if (isExisting) {
+      console.log('  This bridge was already registered. Using existing API key.');
+    } else {
+      console.log('  Your bridge is now registered with the notification proxy!');
+    }
+    console.log('');
+    console.log('  Your API Key:');
+    console.log('  ┌─────────────────────────────────────────────────────────┐');
+    console.log(`  │ ${apiKey} │`);
+    console.log('  └─────────────────────────────────────────────────────────┘');
+    console.log('');
+    console.log('   This key is saved in:', API_KEY_FILE);
+    console.log('   Anonymous mode: 100 notifications/day');
+    console.log('   To link to an account (optional):');
+    console.log(`   Visit: https://notify.aviant.app/link?key=${apiKey.substring(0, 16)}...`);
+    console.log('');
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('');
+    
+    return apiKey;
+    
+  } catch (error) {
+    console.error('');
+    console.error('╔═══════════════════════════════════════════════════════════╗');
+    console.error('║         REGISTRATION FAILED                            ║');
+    console.error('╚═══════════════════════════════════════════════════════════╝');
+    console.error('');
+    console.error('  Error:', error.message);
+    if (error.response) {
+      console.error('  Status:', error.response.status);
+      console.error('  Details:', error.response.data);
+    }
+    console.error('');
+    console.error('  Notifications will NOT work until registration succeeds.');
+    console.error('  Please check:');
+    console.error('  1. Internet connection is working');
+    console.error('  2. Notification proxy is online:', NOTIFICATION_PROXY_URL);
+    console.error('  3. No firewall blocking outbound HTTPS');
+    console.error('');
+    console.error('  You can manually set an API key with:');
+    console.error('  NOTIFICATION_PROXY_TOKEN=your-key-here');
+    console.error('');
+    console.error('═══════════════════════════════════════════════════════════');
+    console.error('');
+    return null;
+  }
+}
+
+// === STARTUP SEQUENCE ===
+
+(async function startBridge() {
+  // Step 1: Register with notification proxy and get API key
+  console.log('[Bridge] Step 1: Registering with notification proxy...');
+  NOTIFICATION_PROXY_TOKEN = await ensureApiKey();
+  
+  if (!NOTIFICATION_PROXY_TOKEN) {
+    console.error('[Bridge]  Starting without notification proxy access');
+    console.error('[Bridge]  Push notifications will NOT work');
+  } else {
+    console.log('[Bridge] Notification proxy ready');
+  }
+  
+  // Step 2: Start Express server
+  console.log('[Bridge] Step 2: Starting HTTP server...');
+  app.listen(config.bridge.port, () => {
+    console.log(`[Bridge] HTTP server listening on port ${config.bridge.port}`);
+    console.log(`[Bridge] Health check: http://localhost:${config.bridge.port}/health`);
+  });
+
+  // Step 3: Connect to MQTT
+  console.log('[Bridge] Step 3: Connecting to MQTT...');
+  console.log(`[MQTT] Connecting to ${config.mqtt.host}...`);
+})();
+
+// MQTT Client (initialized after registration)
 const client = mqtt.connect(config.mqtt.host, {
   username: config.mqtt.username,
   password: config.mqtt.password,
