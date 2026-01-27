@@ -287,6 +287,90 @@ app.get('/tokens', (req, res) => {
   });
 });
 
+// Send test notification
+app.post('/test-notification', async (req, res) => {
+  const { pushToken } = req.body;
+  
+  if (!pushToken) {
+    return res.status(400).json({ error: 'Push token required' });
+  }
+  
+  const device = devices.get(pushToken);
+  if (!device) {
+    return res.status(404).json({ error: 'Device not registered' });
+  }
+  
+  try {
+    console.log(`[Bridge] Sending test notification to: ${device.name}`);
+    
+    // Check if it's an FCM token
+    const isFCMToken = device.tokenType === 'fcm' || (!pushToken.startsWith('ExponentPushToken['));
+    
+    if (isFCMToken) {
+      // Send via FCM
+      const message = {
+        token: pushToken,
+        data: {
+          title: 'Test Notification',
+          body: 'This is a test notification from Aviant Bridge',
+          notificationType: 'test',
+          timestamp: Date.now().toString(),
+        },
+        android: {
+          priority: 'high',
+        },
+        apns: {
+          headers: {
+            'apns-priority': '10',
+          },
+        },
+      };
+      
+      const response = await admin.messaging().send(message);
+      console.log('[Bridge] ✅ Test FCM notification sent:', response);
+      
+      return res.json({ 
+        success: true, 
+        message: 'Test notification sent via FCM',
+        messageId: response,
+      });
+    } else {
+      // Send via Expo Push
+      const expoPushMessage = {
+        to: pushToken,
+        sound: 'default',
+        title: 'Test Notification',
+        body: 'This is a test notification from Aviant Bridge',
+        data: { notificationType: 'test' },
+      };
+      
+      const expoPushResponse = await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(expoPushMessage),
+      });
+      
+      const result = await expoPushResponse.json();
+      console.log('[Bridge] ✅ Test Expo notification sent:', result);
+      
+      return res.json({ 
+        success: true, 
+        message: 'Test notification sent via Expo',
+        result,
+      });
+    }
+  } catch (error) {
+    console.error('[Bridge] ❌ Failed to send test notification:', error.message);
+    return res.status(500).json({ 
+      error: 'Failed to send test notification',
+      details: error.message,
+    });
+  }
+});
+
 // === DEVICE MANAGEMENT ENDPOINTS ===
 
 // List all registered devices with metadata
