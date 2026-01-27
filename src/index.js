@@ -2,6 +2,9 @@ require('dotenv').config();
 const mqtt = require('mqtt');
 const axios = require('axios');
 const express = require('express');
+const admin = require('firebase-admin');
+const fs = require('fs');
+const path = require('path');
 const { version } = require('../package.json');
 
 // Log version on startup
@@ -30,9 +33,40 @@ const config = {
   },
 };
 
+// Notification Proxy Configuration
+// Uses Cloudflare Worker to send notifications (FCM credentials secured there)
+const NOTIFICATION_PROXY_URL = process.env.NOTIFICATION_PROXY_URL || 'https://notify.aviant.app/send';
+const NOTIFICATION_PROXY_TOKEN = process.env.NOTIFICATION_PROXY_TOKEN || 'aviant-default-token';
+
+console.log('[Proxy] Using notification proxy:', NOTIFICATION_PROXY_URL);
+console.log('[Proxy] FCM credentials secured in Cloudflare Worker (not in bridge)');
+
+// Legacy: Firebase Admin SDK (optional fallback)
+let firebaseApp = null;
+let fcmAvailable = false;
+
+// Check if user wants to use legacy direct FCM (not recommended)
+if (process.env.USE_LEGACY_FCM === 'true' && process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+  try {
+    console.log('[FCM] Legacy mode: Using direct FCM with service account');
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    
+    firebaseApp = admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+    fcmAvailable = true;
+    
+    console.log('[FCM] Firebase Admin SDK initialized (legacy mode)');
+    console.log('[FCM] Project ID:', serviceAccount.project_id);
+  } catch (error) {
+    console.error('[FCM] Failed to initialize Firebase Admin SDK:', error.message);
+    fcmAvailable = false;
+  }
+} else {
+  console.log('[Proxy] Using secure notification proxy (recommended)');
+}
+
 // Store push tokens and configuration with persistent storage
-const fs = require('fs');
-const path = require('path');
 
 const DATA_DIR = path.join(__dirname, '../data');
 const TOKENS_FILE = path.join(DATA_DIR, 'tokens.json');
@@ -590,6 +624,181 @@ async function processEventMessage(event) {
   await sendPushNotifications(event);
 }
 
+/**
+ * Detect if token is FCM or Expo Push token
+ */
+function isFCMToken(token) {
+  // Expo Push tokens start with "ExponentPushToken["
+  // FCM tokens are long alphanumeric strings
+  return !token.startsWith('ExponentPushToken[');
+}
+
+/**
+ * Send FCM notification with authenticated image support
+ */
+async function sendFCMNotification(fcmToken, notificationData) {
+  try {
+    const { title, body, thumbnailUrl, jwtToken, camera, reviewId, eventId, timestamp, severity } = notificationData;
+
+    // Use Cloudflare Worker proxy (secure, recommended)
+    if (!fcmAvailable || process.env.USE_LEGACY_FCM !== 'true') {
+      console.log('[Proxy] Sending notification via Cloudflare Worker proxy');
+      
+      const proxyPayload = {
+        token: fcmToken,
+        title: title || 'Frigate Alert',
+        body: body || 'Motion detected',
+        data: {
+          thumbnailUrl: thumbnailUrl || '',
+          jwtToken: jwtToken || '',
+          camera: camera || '',
+          reviewId: reviewId || '',
+          eventId: eventId || '',
+          timestamp: timestamp?.toString() || '',
+          severity: severity || 'detection',
+          notificationType: 'frigate_detection',
+        },
+        android: {
+          notification: {
+            imageUrl: thumbnailUrl,
+          },
+          priority: severity === 'alert' ? 'high' : 'normal',
+        },
+        apns: {
+          headers: {
+            'apns-priority': severity === 'alert' ? '10' : '5',
+          },
+          payload: {
+            aps: {
+              'mutable-content': 1,
+            },
+          },
+          fcm_options: {
+            image: thumbnailUrl,
+          },
+        },
+      };
+
+      const response = await axios.post(NOTIFICATION_PROXY_URL, proxyPayload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${NOTIFICATION_PROXY_TOKEN}`,
+        },
+        timeout: 10000,
+      });
+
+      if (response.data.success) {
+        console.log('[Proxy] Notification sent successfully:', response.data.messageId);
+        return true;
+      } else {
+        console.error('[Proxy] Failed to send notification:', response.data.error);
+        return false;
+      }
+    }
+
+    // Legacy: Direct FCM (fallback, requires service account)
+    console.log('[FCM] Sending notification via direct FCM (legacy mode)');
+    
+    const message = {
+      token: fcmToken,
+      data: {
+        title: title || 'Frigate Alert',
+        body: body || 'Motion detected',
+        thumbnailUrl: thumbnailUrl || '',
+        jwtToken: jwtToken || '',
+        camera: camera || '',
+        reviewId: reviewId || '',
+        eventId: eventId || '',
+        timestamp: timestamp?.toString() || '',
+        severity: severity || 'detection',
+        notificationType: 'frigate_detection',
+      },
+      android: {
+        priority: severity === 'alert' ? 'high' : 'normal',
+      },
+      apns: {
+        headers: {
+          'apns-priority': severity === 'alert' ? '10' : '5',
+        },
+      },
+    };
+
+    const response = await admin.messaging().send(message);
+    console.log('[FCM] Message sent successfully:', response);
+    return true;
+
+  } catch (error) {
+    console.error('[Notification] Failed to send:', error.message);
+    if (error.response) {
+      console.error('[Notification] Response status:', error.response.status);
+      console.error('[Notification] Response data:', error.response.data);
+    }
+    if (error.code === 'messaging/invalid-registration-token' || 
+        error.code === 'messaging/registration-token-not-registered') {
+      console.error('[Notification] Token is invalid or expired - device should re-register');
+    }
+    return false;
+  }
+}
+
+/**
+ * Send Expo Push notification (legacy, fallback)
+ */
+async function sendExpoPushNotification(expoToken, notificationData) {
+  try {
+    const { title, body, thumbnailUrl, camera, reviewId, eventId, timestamp, severity } = notificationData;
+
+    const message = {
+      to: expoToken,
+      sound: 'default',
+      title: title || 'Frigate Alert',
+      body: body || 'Motion detected',
+      priority: severity === 'alert' ? 'high' : 'normal',
+      categoryId: 'frigate_detection',
+      data: {
+        reviewId,
+        camera,
+        severity,
+        timestamp,
+        eventId,
+        thumbnailUrl,
+        type: 'frigate_review',
+        action: 'live',
+      },
+    };
+
+    // Note: Expo Push cannot fetch authenticated images
+    // This is why we're migrating to FCM
+    if (thumbnailUrl) {
+      message.image = thumbnailUrl; // Will fail with 401 for authenticated endpoints
+    }
+
+    const response = await axios.post(
+      'https://exp.host/--/api/v2/push/send',
+      [message],
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    if (response.data && response.data.data && response.data.data[0]) {
+      const result = response.data.data[0];
+      if (result.status === 'ok') {
+        console.log('[Expo] Message sent:', result.id);
+        return true;
+      } else {
+        console.error('[Expo] Error:', result.message);
+        return false;
+      }
+    }
+  } catch (error) {
+    console.error('[Expo] Failed to send:', error.message);
+    return false;
+  }
+}
+
 // Send push notifications for frigate/reviews (new format)
 async function sendReviewNotification(review) {
   if (pushTokens.size === 0) {
@@ -619,7 +828,7 @@ async function sendReviewNotification(review) {
     }
     console.log(`[Push] Using event thumbnail URL (event_id: ${firstEventId})`);
   } else if (reviewId) {
-    console.log(`[Push] ⚠️  No event IDs in review ${reviewId}, cannot fetch thumbnail`);
+    console.log(`[Push] No event IDs in review ${reviewId}, cannot fetch thumbnail`);
   }
   
   // Format camera name
@@ -644,115 +853,74 @@ async function sendReviewNotification(review) {
     scoreFormatted: '', // Review segments don't have scores
   };
   
-  // Prepare notification messages for all tokens (with per-device templates)
-  const messages = Array.from(pushTokens).map(token => {
-    // Get device-specific templates (or use defaults)
-    const device = devices.get(token);
-    const templates = device?.templates || {
-      title: '{label} detected on {camera}',
-      body: 'Motion in {zones} at {time}',
-    };
-    
-    const message = {
-      to: token,
-      sound: 'default',
-      title: formatTemplate(templates.title, templateData),
-      body: formatTemplate(templates.body, templateData),
-      priority: severity === 'alert' ? 'high' : 'normal',
-      categoryId: 'frigate_detection', // For iOS notification categories
-      data: {
-        reviewId: reviewId,
-        camera: camera,
-        objects: objects,
-        zones: zones,
-        severity: severity,
-        timestamp: startTime,
-        type: type === 'update' ? 'frigate_review_update' : 'frigate_review',
-        thumbnailUrl: thumbnailUrl,
-        eventId: firstEventId, // Include event ID for app use
-        action: 'live', // Default action when tapped
-      },
-    };
-    
-    // Add thumbnail image attachment for OS notifications
-    // Using event thumbnail endpoint with JWT token authentication
-    if (thumbnailUrl) {
-      message.image = thumbnailUrl; // Android image
-      message.ios = {
-        attachments: [{ url: thumbnailUrl }], // iOS image
-      };
-    }
-    
-    // Add platform-specific action buttons
-    message.android = {
-      sound: 'default',
-      priority: severity === 'alert' ? 'high' : 'normal',
-      channelId: 'frigate-detections',
-      // Action buttons for Android
-      actions: [
-        {
-          title: '📺 View Live',
-          pressAction: { id: 'view_live' },
-        },
-        {
-          title: '🎥 View Recording',
-          pressAction: { id: 'view_recording' },
-        },
-      ],
-    };
-    
-    // iOS action buttons are handled via notification categories
-    // (already configured in app with categoryId: 'frigate_detection')
-    
-    return message;
-  });
+  // Remove ?token= from thumbnail URL for FCM (JWT will be in data payload)
+  // Keep clean URL without query parameters
+  let cleanThumbnailUrl = thumbnailUrl;
+  if (thumbnailUrl && thumbnailUrl.includes('?token=')) {
+    cleanThumbnailUrl = thumbnailUrl.split('?')[0];
+  }
   
-  // Send to Expo Push API
-  try {
-    console.log(`[Push] Sending ${messages.length} notification(s) for review ${reviewId} (${severity})`);
-    console.log(`[Push] Using templates: title="${messages[0].title}", body="${messages[0].body}"`);
-    if (thumbnailUrl) {
-      console.log(`[Push] Thumbnail URL: ${thumbnailUrl}`);
-      console.log(`[Push] Image attachment: Included for OS notification`);
-    } else {
-      console.log(`[Push] No thumbnail available (no event IDs in review)`);
-    }
-    
-    const response = await axios.post('https://exp.host/--/api/v2/push/send', messages, {
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
-    
-    stats.notificationsSent += messages.length;
-    console.log(`[Push] ✅ Sent ${messages.length} notification(s)${thumbnailUrl ? ' with image attachment' : ''}`);
-    
-    // Log any errors or warnings from Expo
-    if (response.data && response.data.data) {
-      response.data.data.forEach((result, index) => {
-        if (result.status === 'error') {
-          console.error(`[Push] ❌ Error sending to token ${index + 1}:`, result.message);
-          if (result.details) {
-            console.error(`[Push]    Details:`, JSON.stringify(result.details, null, 2));
-          }
-        } else if (result.status === 'ok') {
-          console.log(`[Push] ✅ Token ${index + 1}: ${result.id}`);
-          // Log any warnings (e.g., image fetch issues)
-          if (result.details && result.details.error) {
-            console.warn(`[Push] ⚠️  Warning for token ${index + 1}:`, result.details.error);
-          }
-        }
-      });
-    }
-    
-    // Log the full response for debugging
-    console.log(`[Push] Full Expo response:`, JSON.stringify(response.data, null, 2));
-  } catch (error) {
-    console.error('[Push] ❌ Failed to send notifications:', error.message);
-    if (error.response) {
-      console.error('[Push] Response:', error.response.data);
+  console.log(`[Push] Sending notification(s) for review ${reviewId} (${severity})`);
+  console.log(`[Push] Registered devices: ${pushTokens.size}`);
+  if (thumbnailUrl) {
+    console.log(`[Push] Thumbnail URL: ${cleanThumbnailUrl}`);
+    console.log(`[Push] JWT Token: ${bridgeConfig.frigateJwtToken ? bridgeConfig.frigateJwtToken.substring(0, 20) + '...' : 'Not configured'}`);
+  }
+  
+  // Send to each registered device
+  let fcmCount = 0;
+  let expoCount = 0;
+  let successCount = 0;
+  
+  for (const token of pushTokens) {
+    try {
+      // Get device-specific templates (or use defaults)
+      const device = devices.get(token);
+      const templates = device?.templates || {
+        title: '{label} detected on {camera}',
+        body: 'Motion in {zones} at {time}',
+      };
+      
+      // Format title and body with templates
+      const title = formatTemplate(templates.title, templateData);
+      const body = formatTemplate(templates.body, templateData);
+      
+      console.log(`[Push] Device: ${device?.name || 'Unknown'} (${device?.platform || 'unknown'})`);
+      console.log(`[Push]   Title: "${title}"`);
+      console.log(`[Push]   Body: "${body}"`);
+      
+      // Prepare notification data
+      const notificationData = {
+        title,
+        body,
+        thumbnailUrl: cleanThumbnailUrl,
+        jwtToken: bridgeConfig.frigateJwtToken, // JWT for on-device image fetching
+        camera,
+        reviewId,
+        eventId: firstEventId,
+        timestamp: startTime,
+        severity,
+      };
+      
+      // Detect token type and send via appropriate service
+      if (isFCMToken(token)) {
+        console.log(`[Push]   Type: FCM`);
+        fcmCount++;
+        const success = await sendFCMNotification(token, notificationData);
+        if (success) successCount++;
+      } else {
+        console.log(`[Push]   Type: Expo Push (legacy)`);
+        expoCount++;
+        const success = await sendExpoPushNotification(token, notificationData);
+        if (success) successCount++;
+      }
+    } catch (error) {
+      console.error(`[Push] Error sending to token:`, error.message);
     }
   }
+  
+  stats.notificationsSent += successCount;
+  console.log(`[Push] Sent ${successCount}/${pushTokens.size} notifications (${fcmCount} FCM, ${expoCount} Expo)`);
 }
 
 // Send push notifications to all registered tokens (legacy frigate/events format)
