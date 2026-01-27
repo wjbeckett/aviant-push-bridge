@@ -56,10 +56,10 @@ if (process.env.USE_LEGACY_FCM === 'true' && process.env.FIREBASE_SERVICE_ACCOUN
     });
     fcmAvailable = true;
     
-    console.log('[FCM] Firebase Admin SDK initialized (legacy mode)');
+    console.log('[FCM] ✅ Firebase Admin SDK initialized (legacy mode)');
     console.log('[FCM] Project ID:', serviceAccount.project_id);
   } catch (error) {
-    console.error('[FCM] Failed to initialize Firebase Admin SDK:', error.message);
+    console.error('[FCM] ❌ Failed to initialize Firebase Admin SDK:', error.message);
     fcmAvailable = false;
   }
 } else {
@@ -213,16 +213,28 @@ app.get('/health', (req, res) => {
 
 // Register push token endpoint (with optional device metadata)
 app.post('/register', (req, res) => {
-  const { pushToken, deviceName, deviceModel, platform } = req.body;
+  const { pushToken, deviceName, deviceModel, platform, notificationType } = req.body;
   
-  if (!pushToken || !pushToken.startsWith('ExponentPushToken[')) {
+  // Validate token format
+  if (!pushToken || typeof pushToken !== 'string' || pushToken.length < 10) {
     return res.status(400).json({ error: 'Invalid push token format' });
   }
+  
+  // Detect token type
+  const isExpoToken = pushToken.startsWith('ExponentPushToken[');
+  const isFCMToken = !isExpoToken && pushToken.length > 50; // FCM tokens are typically 150+ chars
+  
+  if (!isExpoToken && !isFCMToken) {
+    return res.status(400).json({ error: 'Unknown push token format' });
+  }
+  
+  const tokenType = isExpoToken ? 'expo' : 'fcm';
   
   // Store device metadata (preserve existing templates if re-registering)
   const existingDevice = devices.get(pushToken);
   const deviceInfo = {
     token: pushToken,
+    tokenType, // Store token type for logging
     name: deviceName || 'Unknown Device',
     model: deviceModel || 'Unknown Model',
     platform: platform || 'Unknown',
@@ -240,7 +252,7 @@ app.post('/register', (req, res) => {
   saveTokens();
   saveDevices();
   
-  console.log(`[Bridge] Registered device: ${deviceInfo.name} (${deviceInfo.model})`);
+  console.log(`[Bridge] ✅ Registered device: ${deviceInfo.name} (${deviceInfo.model}) - Token type: ${tokenType}`);
   console.log(`[Bridge] Total registered devices: ${pushTokens.size}`);
   
   res.json({ 
@@ -688,10 +700,10 @@ async function sendFCMNotification(fcmToken, notificationData) {
       });
 
       if (response.data.success) {
-        console.log('[Proxy] Notification sent successfully:', response.data.messageId);
+        console.log('[Proxy] ✅ Notification sent successfully:', response.data.messageId);
         return true;
       } else {
-        console.error('[Proxy] Failed to send notification:', response.data.error);
+        console.error('[Proxy] ❌ Failed to send notification:', response.data.error);
         return false;
       }
     }
@@ -724,11 +736,11 @@ async function sendFCMNotification(fcmToken, notificationData) {
     };
 
     const response = await admin.messaging().send(message);
-    console.log('[FCM] Message sent successfully:', response);
+    console.log('[FCM] ✅ Message sent successfully:', response);
     return true;
 
   } catch (error) {
-    console.error('[Notification] Failed to send:', error.message);
+    console.error('[Notification] ❌ Failed to send:', error.message);
     if (error.response) {
       console.error('[Notification] Response status:', error.response.status);
       console.error('[Notification] Response data:', error.response.data);
@@ -786,15 +798,15 @@ async function sendExpoPushNotification(expoToken, notificationData) {
     if (response.data && response.data.data && response.data.data[0]) {
       const result = response.data.data[0];
       if (result.status === 'ok') {
-        console.log('[Expo] Message sent:', result.id);
+        console.log('[Expo] ✅ Message sent:', result.id);
         return true;
       } else {
-        console.error('[Expo] Error:', result.message);
+        console.error('[Expo] ❌ Error:', result.message);
         return false;
       }
     }
   } catch (error) {
-    console.error('[Expo] Failed to send:', error.message);
+    console.error('[Expo] ❌ Failed to send:', error.message);
     return false;
   }
 }
@@ -828,7 +840,7 @@ async function sendReviewNotification(review) {
     }
     console.log(`[Push] Using event thumbnail URL (event_id: ${firstEventId})`);
   } else if (reviewId) {
-    console.log(`[Push] No event IDs in review ${reviewId}, cannot fetch thumbnail`);
+    console.log(`[Push] ⚠️  No event IDs in review ${reviewId}, cannot fetch thumbnail`);
   }
   
   // Format camera name
@@ -915,12 +927,12 @@ async function sendReviewNotification(review) {
         if (success) successCount++;
       }
     } catch (error) {
-      console.error(`[Push] Error sending to token:`, error.message);
+      console.error(`[Push] ❌ Error sending to token:`, error.message);
     }
   }
   
   stats.notificationsSent += successCount;
-  console.log(`[Push] Sent ${successCount}/${pushTokens.size} notifications (${fcmCount} FCM, ${expoCount} Expo)`);
+  console.log(`[Push] ✅ Sent ${successCount}/${pushTokens.size} notifications (${fcmCount} FCM, ${expoCount} Expo)`);
 }
 
 // Send push notifications to all registered tokens (legacy frigate/events format)
