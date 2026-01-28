@@ -35,10 +35,11 @@ const config = {
 
 // Notification Proxy Configuration
 // Uses Cloudflare Worker to send notifications (FCM credentials secured there)
-const NOTIFICATION_PROXY_URL = process.env.NOTIFICATION_PROXY_URL || 'https://notify.aviant.app';
+const NOTIFICATION_PROXY_BASE_URL = process.env.NOTIFICATION_PROXY_URL || 'https://notify.aviant.app';
+const NOTIFICATION_PROXY_URL = `${NOTIFICATION_PROXY_BASE_URL}/send`; // Full endpoint for sending notifications
 let NOTIFICATION_PROXY_TOKEN = process.env.NOTIFICATION_PROXY_TOKEN || null; // Will be auto-generated on first run
 
-console.log('[Proxy] Notification proxy:', NOTIFICATION_PROXY_URL);
+console.log('[Proxy] Notification proxy:', NOTIFICATION_PROXY_BASE_URL);
 console.log('[Proxy] FCM credentials secured in Cloudflare Worker (not in bridge)');
 
 // Firebase Admin SDK is NOT initialized on the bridge
@@ -603,11 +604,11 @@ async function ensureApiKey() {
   const bridgeId = generateBridgeId();
   
   try {
-    console.log('[Proxy] Contacting notification proxy:', NOTIFICATION_PROXY_URL);
+    console.log('[Proxy] Contacting notification proxy:', NOTIFICATION_PROXY_BASE_URL);
     console.log('[Proxy] Bridge ID:', bridgeId);
     
     const response = await axios.post(
-      `${NOTIFICATION_PROXY_URL}/register-bridge`,
+      `${NOTIFICATION_PROXY_BASE_URL}/register-bridge`,
       {
         bridgeId: bridgeId,
         hostname: os.hostname(),
@@ -637,7 +638,7 @@ async function ensureApiKey() {
     
     console.log('');
     console.log('╔═══════════════════════════════════════════════════════════╗');
-    console.log('║         REGISTRATION SUCCESSFUL                        ║');
+    console.log('║         ✅ REGISTRATION SUCCESSFUL                        ║');
     console.log('╚═══════════════════════════════════════════════════════════╝');
     console.log('');
     if (isExisting) {
@@ -646,15 +647,15 @@ async function ensureApiKey() {
       console.log('  Your bridge is now registered with the notification proxy!');
     }
     console.log('');
-    console.log('  Your API Key:');
+    console.log('  📋 Your API Key:');
     console.log('  ┌─────────────────────────────────────────────────────────┐');
     console.log(`  │ ${apiKey} │`);
     console.log('  └─────────────────────────────────────────────────────────┘');
     console.log('');
-    console.log('   This key is saved in:', API_KEY_FILE);
-    console.log('   Anonymous mode: 100 notifications/day');
-    console.log('   To link to an account (optional):');
-    console.log(`   Visit: https://notify.aviant.app/link?key=${apiKey.substring(0, 16)}...`);
+    console.log('  ℹ️  This key is saved in:', API_KEY_FILE);
+    console.log('  ℹ️  Anonymous mode: 100 notifications/day');
+    console.log('  ℹ️  To link to an account (optional):');
+    console.log(`  ℹ️  Visit: https://notify.aviant.app/link?key=${apiKey.substring(0, 16)}...`);
     console.log('');
     console.log('═══════════════════════════════════════════════════════════');
     console.log('');
@@ -664,7 +665,7 @@ async function ensureApiKey() {
   } catch (error) {
     console.error('');
     console.error('╔═══════════════════════════════════════════════════════════╗');
-    console.error('║         REGISTRATION FAILED                            ║');
+    console.error('║         ❌ REGISTRATION FAILED                            ║');
     console.error('╚═══════════════════════════════════════════════════════════╝');
     console.error('');
     console.error('  Error:', error.message);
@@ -676,7 +677,7 @@ async function ensureApiKey() {
     console.error('  Notifications will NOT work until registration succeeds.');
     console.error('  Please check:');
     console.error('  1. Internet connection is working');
-    console.error('  2. Notification proxy is online:', NOTIFICATION_PROXY_URL);
+    console.error('  2. Notification proxy is online:', NOTIFICATION_PROXY_BASE_URL);
     console.error('  3. No firewall blocking outbound HTTPS');
     console.error('');
     console.error('  You can manually set an API key with:');
@@ -696,16 +697,16 @@ async function ensureApiKey() {
   NOTIFICATION_PROXY_TOKEN = await ensureApiKey();
   
   if (!NOTIFICATION_PROXY_TOKEN) {
-    console.error('[Bridge]  Starting without notification proxy access');
-    console.error('[Bridge]  Push notifications will NOT work');
+    console.error('[Bridge] ⚠️  Starting without notification proxy access');
+    console.error('[Bridge] ⚠️  Push notifications will NOT work');
   } else {
-    console.log('[Bridge] Notification proxy ready');
+    console.log('[Bridge] ✅ Notification proxy ready');
   }
   
   // Step 2: Start Express server
   console.log('[Bridge] Step 2: Starting HTTP server...');
   app.listen(config.bridge.port, () => {
-    console.log(`[Bridge] HTTP server listening on port ${config.bridge.port}`);
+    console.log(`[Bridge] ✅ HTTP server listening on port ${config.bridge.port}`);
     console.log(`[Bridge] Health check: http://localhost:${config.bridge.port}/health`);
   });
 
