@@ -1056,22 +1056,28 @@ async function sendReviewNotification(review) {
     obj.charAt(0).toUpperCase() + obj.slice(1)
   ).join(', ');
   
-  // Build thumbnail URL using event ID (not review ID)
-  // Reviews contain a "detections" array with event IDs - use the first one
-  // Event thumbnails are the standard way to get images with ?token= auth
+  // Build thumbnail URL using review thumb_path (like Frigate PWA does)
+  // This matches what users see in Frigate web notifications
   let thumbnailUrl = null;
-  const firstEventId = detections.length > 0 ? detections[0] : null;
+  const thumbPath = review.after?.thumb_path || review.thumb_path;
   
-  if (firstEventId && bridgeConfig.externalFrigateUrl) {
-    // Use /api/events/:event_id/thumbnail.jpg (standard endpoint)
-    thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/events/${firstEventId}/thumbnail.jpg`;
+  if (thumbPath && bridgeConfig.externalFrigateUrl) {
+    // Use review thumbnail path - same as Frigate PWA
+    // Format: /media/frigate/clips/review/thumbnails/{reviewId}.webp
+    // Remove /media/frigate prefix as Frigate does
+    const cleanPath = thumbPath.replace('/media/frigate', '');
+    thumbnailUrl = `${bridgeConfig.externalFrigateUrl}${cleanPath}`;
+    
     if (bridgeConfig.frigateJwtToken) {
       thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
     }
-    console.log(`[Push] Using event thumbnail URL (event_id: ${firstEventId})`);
+    console.log(`[Push] Using review thumbnail URL (review_id: ${reviewId})`);
   } else if (reviewId) {
-    console.log(`[Push] ⚠️  No event IDs in review ${reviewId}, cannot fetch thumbnail`);
+    console.log(`[Push] ⚠️  No thumb_path in review ${reviewId}, cannot fetch thumbnail`);
   }
+  
+  // Extract first event ID for deep linking (still useful for jumping to specific detection)
+  const firstEventId = detections.length > 0 ? detections[0] : null;
   
   // Format camera name
   const formattedCamera = camera.replace(/_/g, ' ');
