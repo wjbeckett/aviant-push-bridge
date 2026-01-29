@@ -45,7 +45,7 @@ console.log('[Proxy] FCM credentials secured in Cloudflare Worker (not in bridge
 // Firebase Admin SDK is NOT initialized on the bridge
 // All notifications are sent via the secure Cloudflare Worker proxy
 // This keeps FCM credentials secure and separate from the bridge
-const fcmAvailable = false;
+const fcmAvailable = false; // FCM not initialized on bridge, using proxy instead
 console.log('[Bridge] Notification proxy mode: FCM credentials secured in Cloudflare Worker');
 console.log('[Bridge] Bridge does NOT have direct access to FCM credentials (secure by design)');
 
@@ -914,9 +914,12 @@ async function sendFCMNotification(fcmToken, notificationData) {
       
       const proxyPayload = {
         token: fcmToken,
-        title: title || 'Frigate Alert',
-        body: body || 'Motion detected',
+        // DATA-ONLY message (no 'notification' field)
+        // This ensures FrigateMessagingService.onMessageReceived() is ALWAYS called,
+        // even when app is in background, so it can fetch authenticated images
         data: {
+          title: title || 'Frigate Alert',
+          body: body || 'Motion detected',
           thumbnailUrl: thumbnailUrl || '',
           jwtToken: jwtToken || '',
           camera: camera || '',
@@ -927,9 +930,6 @@ async function sendFCMNotification(fcmToken, notificationData) {
           notificationType: 'frigate_detection',
         },
         android: {
-          notification: {
-            image: thumbnailUrl,
-          },
           priority: severity === 'alert' ? 'high' : 'normal',
         },
         apns: {
