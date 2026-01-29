@@ -11,6 +11,9 @@ RUN npm ci --only=production
 # Copy application code
 COPY src ./src
 
+# Copy device management CLI
+COPY manage-devices.js ./
+
 # Expose bridge port
 EXPOSE 3002
 
