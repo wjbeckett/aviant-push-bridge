@@ -45,6 +45,7 @@ console.log('[Proxy] FCM credentials secured in Cloudflare Worker (not in bridge
 // Firebase Admin SDK is NOT initialized on the bridge
 // All notifications are sent via the secure Cloudflare Worker proxy
 // This keeps FCM credentials secure and separate from the bridge
+const fcmAvailable = false;
 console.log('[Bridge] Notification proxy mode: FCM credentials secured in Cloudflare Worker');
 console.log('[Bridge] Bridge does NOT have direct access to FCM credentials (secure by design)');
 
