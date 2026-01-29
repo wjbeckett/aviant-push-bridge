@@ -928,7 +928,7 @@ async function sendFCMNotification(fcmToken, notificationData) {
         },
         android: {
           notification: {
-            imageUrl: thumbnailUrl,
+            image: thumbnailUrl,
           },
           priority: severity === 'alert' ? 'high' : 'normal',
         },
