@@ -782,9 +782,16 @@ client.on('message', async (topic, message) => {
 // Process frigate/reviews message (new format)
 async function processReviewMessage(review) {
   // Only process 'new' and 'update' reviews (not 'end')
-  // 'new' = review just started
-  // 'update' = review severity changed (detection -> alert) or new objects added
-  if (review.type !== 'new' && review.type !== 'update') {
+  // NOTIFICATION STRATEGY: Only process 'update' reviews (like Frigate PWA)
+  // This ensures thumb_path is available (best frame selected)
+  // 
+  // Trade-off:
+  //   'update' only = Slower but best thumbnail (webp with all objects)
+  //   'new' + 'update' = Faster but might miss thumbnail on first notification
+  //
+  // To enable faster notifications, change to: if (review.type !== 'new' && review.type !== 'update')
+  if (review.type !== 'update') {
+    console.log(`[Filter] Skipping '${review.type}' review - waiting for 'update' with best thumbnail`);
     return;
   }
   
@@ -835,7 +842,9 @@ async function processReviewMessage(review) {
   // Update cooldown
   notificationCooldowns.set(cooldownKey, now);
   
-  console.log(`[Review] ${severity.toUpperCase()} on ${camera}: ${objects.join(', ')}`);
+  console.log(`[Review] ${severity.toUpperCase()} on ${camera}: ${objects.join(', ')} (type: ${review.type})`);
+  console.log(`[Review] Detections: ${detections.length > 0 ? detections.slice(0, 3).join(', ') + (detections.length > 3 ? '...' : '') : 'none'}`);
+  console.log(`[Review] thumb_path: ${(review.after?.thumb_path || review.thumb_path) ? 'EXISTS' : 'MISSING'}`);
   
   // Send push notification
   await sendReviewNotification({
@@ -1056,28 +1065,35 @@ async function sendReviewNotification(review) {
     obj.charAt(0).toUpperCase() + obj.slice(1)
   ).join(', ');
   
-  // Build thumbnail URL using review thumb_path (like Frigate PWA does)
-  // This matches what users see in Frigate web notifications
+  // Extract first event ID for deep linking and thumbnail fallback
+  const firstEventId = detections.length > 0 ? detections[0] : null;
+  
+  // Build thumbnail URL - smart fallback strategy like Frigate PWA
   let thumbnailUrl = null;
   const thumbPath = review.after?.thumb_path || review.thumb_path;
   
   if (thumbPath && bridgeConfig.externalFrigateUrl) {
-    // Use review thumbnail path - same as Frigate PWA
+    // Option 1: Use review thumbnail path (webp) - best quality, shows all detected objects
     // Format: /media/frigate/clips/review/thumbnails/{reviewId}.webp
-    // Remove /media/frigate prefix as Frigate does
     const cleanPath = thumbPath.replace('/media/frigate', '');
     thumbnailUrl = `${bridgeConfig.externalFrigateUrl}${cleanPath}`;
     
     if (bridgeConfig.frigateJwtToken) {
       thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
     }
-    console.log(`[Push] Using review thumbnail URL (review_id: ${reviewId})`);
-  } else if (reviewId) {
-    console.log(`[Push] ⚠️  No thumb_path in review ${reviewId}, cannot fetch thumbnail`);
+    console.log(`[Push] ✅ Review thumbnail (webp): ${cleanPath}`);
+  } else if (firstEventId && bridgeConfig.externalFrigateUrl) {
+    // Option 2: Use notification-specific API (optimized for push notifications)
+    // This endpoint is specifically designed for notifications and is always available
+    thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/notifications/${firstEventId}/thumbnail.jpg`;
+    
+    if (bridgeConfig.frigateJwtToken) {
+      thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
+    }
+    console.log(`[Push] ✅ Notifications API fallback (event: ${firstEventId})`);
+  } else {
+    console.log(`[Push] ⚠️  No thumbnail available (detections: ${detections.length})`);
   }
-  
-  // Extract first event ID for deep linking (still useful for jumping to specific detection)
-  const firstEventId = detections.length > 0 ? detections[0] : null;
   
   // Format camera name
   const formattedCamera = camera.replace(/_/g, ' ');
