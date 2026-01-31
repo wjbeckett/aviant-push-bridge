@@ -843,9 +843,12 @@ async function processReviewMessage(review) {
   // Update cooldown (using reviewId prevents duplicate notifications for same event)
   notificationCooldowns.set(cooldownKey, now);
   
+  // Extract thumb_path
+  const thumbPath = review.after?.thumb_path || review.thumb_path;
+  
   console.log(`[Review] ${severity.toUpperCase()} on ${camera}: ${objects.join(', ')} (type: ${review.type})`);
   console.log(`[Review] Detections: ${detections.length > 0 ? detections.slice(0, 3).join(', ') + (detections.length > 3 ? '...' : '') : 'none'}`);
-  console.log(`[Review] thumb_path: ${(review.after?.thumb_path || review.thumb_path) ? 'EXISTS' : 'MISSING'}`);
+  console.log(`[Review] thumb_path: ${thumbPath ? 'EXISTS (' + thumbPath + ')' : 'MISSING'}`);
   
   // Send push notification
   await sendReviewNotification({
@@ -855,6 +858,7 @@ async function processReviewMessage(review) {
     objects,
     zones,
     detections, // Pass detections array for thumbnail URL
+    thumbPath, // Pass thumb_path for webp thumbnail
     startTime,
     type: review.type, // 'new' or 'update'
   });
@@ -1058,7 +1062,7 @@ async function sendReviewNotification(review) {
     return;
   }
   
-  const { reviewId, camera, severity, objects, zones, detections, startTime, type } = review;
+  const { reviewId, camera, severity, objects, zones, detections, thumbPath, startTime, type } = review;
   
   // Format objects list for notification title
   const objectsList = objects.length > 0 ? objects.join(', ') : 'Activity';
@@ -1071,7 +1075,6 @@ async function sendReviewNotification(review) {
   
   // Build thumbnail URL - smart fallback strategy like Frigate PWA
   let thumbnailUrl = null;
-  const thumbPath = review.after?.thumb_path || review.thumb_path;
   
   if (thumbPath && bridgeConfig.externalFrigateUrl) {
     // Option 1: Use review thumbnail path (webp) - best quality, shows all detected objects
@@ -1084,16 +1087,19 @@ async function sendReviewNotification(review) {
     }
     console.log(`[Push] ✅ Review thumbnail (webp): ${cleanPath}`);
   } else if (firstEventId && bridgeConfig.externalFrigateUrl) {
-    // Option 2: Use notification-specific API (optimized for push notifications)
-    // This endpoint is specifically designed for notifications and is always available
-    thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/notifications/${firstEventId}/thumbnail.jpg`;
+    // Option 2: Fallback to Events API (JPG) - reliable but lower quality than webp
+    // Note: /api/notifications/ doesn't work, but /api/events/ does!
+    thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/events/${firstEventId}/thumbnail.jpg`;
     
     if (bridgeConfig.frigateJwtToken) {
       thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
     }
-    console.log(`[Push] ✅ Notifications API fallback (event: ${firstEventId})`);
+    console.log(`[Push] ⚠️  Events API fallback (JPG) - event: ${firstEventId}`);
   } else {
-    console.log(`[Push] ⚠️  No thumbnail available (detections: ${detections.length})`);
+    // No thumbnail available at all
+    console.log(`[Push] ❌ No thumbnail available - thumb_path missing and no event IDs`);
+    console.log(`[Push] ❌ Review ID: ${reviewId}, Detections: ${detections.length}`);
+    console.log(`[Push] ❌ This notification will arrive WITHOUT an image`);
   }
   
   // Format camera name
