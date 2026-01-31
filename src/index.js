@@ -782,16 +782,17 @@ client.on('message', async (topic, message) => {
 // Process frigate/reviews message (new format)
 async function processReviewMessage(review) {
   // Only process 'new' and 'update' reviews (not 'end')
-  // NOTIFICATION STRATEGY: Only process 'update' reviews (like Frigate PWA)
+  // NOTIFICATION STRATEGY: Process 'update' and 'end' reviews (both have thumb_path)
   // This ensures thumb_path is available (best frame selected)
   // 
-  // Trade-off:
-  //   'update' only = Slower but best thumbnail (webp with all objects)
-  //   'new' + 'update' = Faster but might miss thumbnail on first notification
+  // Review lifecycle:
+  //   'new' = Detection starts (thumb_path might not exist yet)
+  //   'update' = Severity changes or objects added (thumb_path exists)
+  //   'end' = Detection ends (thumb_path exists)
   //
-  // To enable faster notifications, change to: if (review.type !== 'new' && review.type !== 'update')
-  if (review.type !== 'update') {
-    console.log(`[Filter] Skipping '${review.type}' review - waiting for 'update' with best thumbnail`);
+  // We skip 'new' to wait for best thumbnail, and use 'update' OR 'end' (whichever comes first)
+  if (review.type !== 'update' && review.type !== 'end') {
+    console.log(`[Filter] Skipping '${review.type}' review - waiting for 'update'/'end' with thumbnail`);
     return;
   }
   
@@ -829,17 +830,17 @@ async function processReviewMessage(review) {
     }
   }
   
-  // Check cooldown to prevent spam
-  const cooldownKey = `${camera}_review`;
+  // Check cooldown to prevent spam AND deduplicate same review
+  const cooldownKey = `${camera}_review_${reviewId}`;
   const lastNotification = notificationCooldowns.get(cooldownKey);
   const now = Date.now();
   
   if (lastNotification && (now - lastNotification) < bridgeConfig.notifications.cooldown * 1000) {
-    console.log(`[Cooldown] Skipping notification for ${cooldownKey} (cooldown active)`);
+    console.log(`[Cooldown] Skipping notification for ${cooldownKey} (already sent)`);
     return;
   }
   
-  // Update cooldown
+  // Update cooldown (using reviewId prevents duplicate notifications for same event)
   notificationCooldowns.set(cooldownKey, now);
   
   console.log(`[Review] ${severity.toUpperCase()} on ${camera}: ${objects.join(', ')} (type: ${review.type})`);
