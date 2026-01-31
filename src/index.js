@@ -1124,18 +1124,12 @@ async function sendReviewNotification(review) {
     scoreFormatted: '', // Review segments don't have scores
   };
   
-  // Remove ?token= from thumbnail URL for FCM (JWT will be in data payload)
-  // Keep clean URL without query parameters
-  let cleanThumbnailUrl = thumbnailUrl;
-  if (thumbnailUrl && thumbnailUrl.includes('?token=')) {
-    cleanThumbnailUrl = thumbnailUrl.split('?')[0];
-  }
-  
+  // IMPORTANT: Keep full URL with ?token= parameter for notification images
+  // OS notification systems fetch images BEFORE app opens, so token must be in URL
   console.log(`[Push] Sending notification(s) for review ${reviewId} (${severity})`);
   console.log(`[Push] Registered devices: ${pushTokens.size}`);
   if (thumbnailUrl) {
-    console.log(`[Push] Thumbnail URL: ${cleanThumbnailUrl}`);
-    console.log(`[Push] JWT Token: ${bridgeConfig.frigateJwtToken ? bridgeConfig.frigateJwtToken.substring(0, 20) + '...' : 'Not configured'}`);
+    console.log(`[Push] Thumbnail URL (with auth): ${thumbnailUrl}`);
   }
   
   // Send to each registered device
@@ -1164,8 +1158,8 @@ async function sendReviewNotification(review) {
       const notificationData = {
         title,
         body,
-        thumbnailUrl: cleanThumbnailUrl,
-        jwtToken: bridgeConfig.frigateJwtToken, // JWT for on-device image fetching
+        thumbnailUrl: thumbnailUrl, // Full URL with ?token= for OS to fetch image
+        jwtToken: bridgeConfig.frigateJwtToken, // Also include JWT for app deep linking
         camera,
         reviewId,
         eventId: firstEventId,
