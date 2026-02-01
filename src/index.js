@@ -1254,12 +1254,20 @@ async function sendReviewNotification(review) {
     // Option 2: Fallback to Events API (JPG) - reliable but lower quality than webp
     // Note: /api/notifications/ doesn't work, but /api/events/ does!
     thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/events/${firstEventId}/thumbnail.jpg`;
+    // Option 2: Fallback to Events API (JPG) - reliable but lower quality than webp
+    // Note: /api/notifications/ doesn't work, but /api/events/ does!
+    thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/events/${firstEventId}/thumbnail.jpg`;
     
     if (bridgeConfig.frigateJwtToken) {
       thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
     }
     console.log(`[Push] ⚠️  Events API fallback (JPG) - event: ${firstEventId}`);
+    console.log(`[Push] ⚠️  Events API fallback (JPG) - event: ${firstEventId}`);
   } else {
+    // No thumbnail available at all
+    console.log(`[Push] ❌ No thumbnail available - thumb_path missing and no event IDs`);
+    console.log(`[Push] ❌ Review ID: ${reviewId}, Detections: ${detections.length}`);
+    console.log(`[Push] ❌ This notification will arrive WITHOUT an image`);
     // No thumbnail available at all
     console.log(`[Push] ❌ No thumbnail available - thumb_path missing and no event IDs`);
     console.log(`[Push] ❌ Review ID: ${reviewId}, Detections: ${detections.length}`);
@@ -1290,9 +1298,12 @@ async function sendReviewNotification(review) {
   
   // IMPORTANT: Keep full URL with ?token= parameter for notification images
   // OS notification systems fetch images BEFORE app opens, so token must be in URL
+  // IMPORTANT: Keep full URL with ?token= parameter for notification images
+  // OS notification systems fetch images BEFORE app opens, so token must be in URL
   console.log(`[Push] Sending notification(s) for review ${reviewId} (${severity})`);
   console.log(`[Push] Registered devices: ${pushTokens.size}`);
   if (thumbnailUrl) {
+    console.log(`[Push] Thumbnail URL (with auth): ${thumbnailUrl}`);
     console.log(`[Push] Thumbnail URL (with auth): ${thumbnailUrl}`);
   }
   
@@ -1322,6 +1333,8 @@ async function sendReviewNotification(review) {
       const notificationData = {
         title,
         body,
+        thumbnailUrl: thumbnailUrl, // Full URL with ?token= for OS to fetch image
+        jwtToken: bridgeConfig.frigateJwtToken, // Also include JWT for app deep linking
         thumbnailUrl: thumbnailUrl, // Full URL with ?token= for OS to fetch image
         jwtToken: bridgeConfig.frigateJwtToken, // Also include JWT for app deep linking
         camera,
