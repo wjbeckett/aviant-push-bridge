@@ -643,7 +643,7 @@ async function ensureApiKey() {
     
     console.log('');
     console.log('╔═══════════════════════════════════════════════════════════╗');
-    console.log('║         ✅ REGISTRATION SUCCESSFUL                        ║');
+    console.log('║         REGISTRATION SUCCESSFUL                        ║');
     console.log('╚═══════════════════════════════════════════════════════════╝');
     console.log('');
     if (isExisting) {
@@ -652,15 +652,15 @@ async function ensureApiKey() {
       console.log('  Your bridge is now registered with the notification proxy!');
     }
     console.log('');
-    console.log('  📋 Your API Key:');
+    console.log('  Your API Key:');
     console.log('  ┌─────────────────────────────────────────────────────────┐');
     console.log(`  │ ${apiKey} │`);
     console.log('  └─────────────────────────────────────────────────────────┘');
     console.log('');
-    console.log('  ℹ️  This key is saved in:', API_KEY_FILE);
-    console.log('  ℹ️  Anonymous mode: 100 notifications/day');
-    console.log('  ℹ️  To link to an account (optional):');
-    console.log(`  ℹ️  Visit: https://notify.aviant.app/link?key=${apiKey.substring(0, 16)}...`);
+    console.log('  This key is saved in:', API_KEY_FILE);
+    console.log('  Anonymous mode: 100 notifications/day');
+    console.log('  To link to an account (optional):');
+    console.log(`  Visit: https://notify.aviant.app/link?key=${apiKey.substring(0, 16)}...`);
     console.log('');
     console.log('═══════════════════════════════════════════════════════════');
     console.log('');
@@ -670,7 +670,7 @@ async function ensureApiKey() {
   } catch (error) {
     console.error('');
     console.error('╔═══════════════════════════════════════════════════════════╗');
-    console.error('║         ❌ REGISTRATION FAILED                            ║');
+    console.error('║         REGISTRATION FAILED                            ║');
     console.error('╚═══════════════════════════════════════════════════════════╝');
     console.error('');
     console.error('  Error:', error.message);
@@ -1133,21 +1133,21 @@ async function sendFCMNotification(fcmToken, notificationData) {
       });
 
       if (response.data.success) {
-        console.log('[Proxy] ✅ Notification sent successfully:', response.data.messageId);
+        console.log('[Proxy] Notification sent successfully:', response.data.messageId);
         return true;
       } else {
-        console.error('[Proxy] ❌ Failed to send notification:', response.data.error);
+        console.error('[Proxy] Failed to send notification:', response.data.error);
         return false;
       }
     }
 
     // No direct FCM fallback - proxy is required
-    console.error('[Notification] ❌ Proxy failed and no fallback configured');
+    console.error('[Notification] Proxy failed and no fallback configured');
     console.error('[Notification] Please ensure your Cloudflare Worker proxy is running');
     return false;
 
   } catch (error) {
-    console.error('[Notification] ❌ Failed to send:', error.message);
+    console.error('[Notification] Failed to send:', error.message);
     if (error.response) {
       console.error('[Notification] Response status:', error.response.status);
       console.error('[Notification] Response data:', error.response.data);
@@ -1206,15 +1206,15 @@ async function sendExpoPushNotification(expoToken, notificationData) {
     if (response.data && response.data.data && response.data.data[0]) {
       const result = response.data.data[0];
       if (result.status === 'ok') {
-        console.log('[Expo] ✅ Message sent:', result.id);
+        console.log('[Expo] Message sent:', result.id);
         return true;
       } else {
-        console.error('[Expo] ❌ Error:', result.message);
+        console.error('[Expo] Error:', result.message);
         return false;
       }
     }
   } catch (error) {
-    console.error('[Expo] ❌ Failed to send:', error.message);
+    console.error('[Expo] Failed to send:', error.message);
     return false;
   }
 }
@@ -1249,11 +1249,8 @@ async function sendReviewNotification(review) {
     if (bridgeConfig.frigateJwtToken) {
       thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
     }
-    console.log(`[Push] ✅ Review thumbnail (webp): ${cleanPath}`);
+    console.log(`[Push] Review thumbnail (webp): ${cleanPath}`);
   } else if (firstEventId && bridgeConfig.externalFrigateUrl) {
-    // Option 2: Fallback to Events API (JPG) - reliable but lower quality than webp
-    // Note: /api/notifications/ doesn't work, but /api/events/ does!
-    thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/events/${firstEventId}/thumbnail.jpg`;
     // Option 2: Fallback to Events API (JPG) - reliable but lower quality than webp
     // Note: /api/notifications/ doesn't work, but /api/events/ does!
     thumbnailUrl = `${bridgeConfig.externalFrigateUrl}/api/events/${firstEventId}/thumbnail.jpg`;
@@ -1261,13 +1258,8 @@ async function sendReviewNotification(review) {
     if (bridgeConfig.frigateJwtToken) {
       thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
     }
-    console.log(`[Push] ⚠️  Events API fallback (JPG) - event: ${firstEventId}`);
-    console.log(`[Push] ⚠️  Events API fallback (JPG) - event: ${firstEventId}`);
+    console.log(`[Push] Events API fallback (JPG) - event: ${firstEventId}`);
   } else {
-    // No thumbnail available at all
-    console.log(`[Push] ❌ No thumbnail available - thumb_path missing and no event IDs`);
-    console.log(`[Push] ❌ Review ID: ${reviewId}, Detections: ${detections.length}`);
-    console.log(`[Push] ❌ This notification will arrive WITHOUT an image`);
     // No thumbnail available at all
     console.log(`[Push] ❌ No thumbnail available - thumb_path missing and no event IDs`);
     console.log(`[Push] ❌ Review ID: ${reviewId}, Detections: ${detections.length}`);
@@ -1298,12 +1290,9 @@ async function sendReviewNotification(review) {
   
   // IMPORTANT: Keep full URL with ?token= parameter for notification images
   // OS notification systems fetch images BEFORE app opens, so token must be in URL
-  // IMPORTANT: Keep full URL with ?token= parameter for notification images
-  // OS notification systems fetch images BEFORE app opens, so token must be in URL
   console.log(`[Push] Sending notification(s) for review ${reviewId} (${severity})`);
   console.log(`[Push] Registered devices: ${pushTokens.size}`);
   if (thumbnailUrl) {
-    console.log(`[Push] Thumbnail URL (with auth): ${thumbnailUrl}`);
     console.log(`[Push] Thumbnail URL (with auth): ${thumbnailUrl}`);
   }
   
@@ -1333,8 +1322,6 @@ async function sendReviewNotification(review) {
       const notificationData = {
         title,
         body,
-        thumbnailUrl: thumbnailUrl, // Full URL with ?token= for OS to fetch image
-        jwtToken: bridgeConfig.frigateJwtToken, // Also include JWT for app deep linking
         thumbnailUrl: thumbnailUrl, // Full URL with ?token= for OS to fetch image
         jwtToken: bridgeConfig.frigateJwtToken, // Also include JWT for app deep linking
         camera,
