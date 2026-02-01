@@ -741,7 +741,7 @@ client.on('connect', () => {
       
       // Log recommendation if using old events topic
       if (config.mqtt.topic === 'frigate/events') {
-        console.log('[MQTT] Using frigate/events topic. Consider switching to frigate/reviews for better notification management.');
+        console.log('[MQTT] ⚠️  Using frigate/events topic. Consider switching to frigate/reviews for better notification management.');
       }
     }
   });
