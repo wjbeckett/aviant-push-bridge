@@ -240,7 +240,7 @@ app.post('/register', (req, res) => {
   saveTokens();
   saveDevices();
   
-  console.log(`[Bridge] ✅ Registered device: ${deviceInfo.name} (${deviceInfo.model}) - Token type: ${tokenType}`);
+  console.log(`[Bridge] Registered device: ${deviceInfo.name} (${deviceInfo.model}) - Token type: ${tokenType}`);
   console.log(`[Bridge] Total registered devices: ${pushTokens.size}`);
   
   res.json({ 
@@ -317,7 +317,7 @@ app.post('/test-notification', async (req, res) => {
         timeout: 10000,
       });
       
-      console.log('[Bridge] ✅ Test notification sent via proxy:', response.data);
+      console.log('[Bridge] Test notification sent via proxy:', response.data);
       
       return res.json({ 
         success: true, 
@@ -344,7 +344,7 @@ app.post('/test-notification', async (req, res) => {
         timeout: 10000,
       });
       
-      console.log('[Bridge] ✅ Test Expo notification sent:', expoPushResponse.data);
+      console.log('[Bridge] Test Expo notification sent:', expoPushResponse.data);
       
       return res.json({ 
         success: true, 
@@ -353,7 +353,7 @@ app.post('/test-notification', async (req, res) => {
       });
     }
   } catch (error) {
-    console.error('[Bridge] ❌ Failed to send test notification:', error.message);
+    console.error('[Bridge] Failed to send test notification:', error.message);
     if (error.response) {
       console.error('[Bridge] Proxy response:', error.response.status, error.response.data);
     }
@@ -702,16 +702,16 @@ async function ensureApiKey() {
   NOTIFICATION_PROXY_TOKEN = await ensureApiKey();
   
   if (!NOTIFICATION_PROXY_TOKEN) {
-    console.error('[Bridge] ⚠️  Starting without notification proxy access');
-    console.error('[Bridge] ⚠️  Push notifications will NOT work');
+    console.error('[Bridge] Starting without notification proxy access');
+    console.error('[Bridge] Push notifications will NOT work');
   } else {
-    console.log('[Bridge] ✅ Notification proxy ready');
+    console.log('[Bridge] Notification proxy ready');
   }
   
   // Step 2: Start Express server
   console.log('[Bridge] Step 2: Starting HTTP server...');
   app.listen(config.bridge.port, () => {
-    console.log(`[Bridge] ✅ HTTP server listening on port ${config.bridge.port}`);
+    console.log(`[Bridge] HTTP server listening on port ${config.bridge.port}`);
     console.log(`[Bridge] Health check: http://localhost:${config.bridge.port}/health`);
   });
 
@@ -741,7 +741,7 @@ client.on('connect', () => {
       
       // Log recommendation if using old events topic
       if (config.mqtt.topic === 'frigate/events') {
-        console.log('[MQTT] ⚠️  Using frigate/events topic. Consider switching to frigate/reviews for better notification management.');
+        console.log('[MQTT] Using frigate/events topic. Consider switching to frigate/reviews for better notification management.');
       }
     }
   });
