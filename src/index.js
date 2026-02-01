@@ -741,7 +741,7 @@ client.on('connect', () => {
       
       // Log recommendation if using old events topic
       if (config.mqtt.topic === 'frigate/events') {
-        console.log('[MQTT] ⚠️  Using frigate/events topic. Consider switching to frigate/reviews for better notification management.');
+        console.log('[MQTT] Using frigate/events topic. Consider switching to frigate/reviews for better notification management.');
       }
     }
   });
@@ -1098,28 +1098,20 @@ async function sendFCMNotification(fcmToken, notificationData) {
           notificationType: 'frigate_alert',
           notificationTag: notificationTag, // For Android grouping/replacing
         },
+        // High priority for data-only messages (required for background delivery)
         android: {
-          priority: 'high', // Always high for alerts
-          notification: {
-            channelId: 'frigate_alerts', // Android notification channel
-            tag: notificationTag, // Same tag = replace existing notification
-            sound: 'default',
-          },
+          priority: 'high',
+          // Note: channelId removed from payload - channel is created by FrigateMessagingService
         },
         apns: {
           headers: {
-            'apns-priority': '10', // Always high for alerts
-            'apns-collapse-id': notificationTag, // iOS equivalent of Android tag
+            'apns-priority': '10',
           },
           payload: {
             aps: {
               'mutable-content': 1,
-              sound: 'default',
-              category: 'FRIGATE_ALERT',
+              'content-available': 1,
             },
-          },
-          fcm_options: {
-            image: thumbnailUrl,
           },
         },
       };
