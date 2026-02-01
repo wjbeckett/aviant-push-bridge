@@ -1261,9 +1261,9 @@ async function sendReviewNotification(review) {
     console.log(`[Push] Events API fallback (JPG) - event: ${firstEventId}`);
   } else {
     // No thumbnail available at all
-    console.log(`[Push] ❌ No thumbnail available - thumb_path missing and no event IDs`);
-    console.log(`[Push] ❌ Review ID: ${reviewId}, Detections: ${detections.length}`);
-    console.log(`[Push] ❌ This notification will arrive WITHOUT an image`);
+    console.log(`[Push] No thumbnail available - thumb_path missing and no event IDs`);
+    console.log(`[Push] Review ID: ${reviewId}, Detections: ${detections.length}`);
+    console.log(`[Push] This notification will arrive WITHOUT an image`);
   }
   
   // Format camera name
@@ -1345,12 +1345,12 @@ async function sendReviewNotification(review) {
         if (success) successCount++;
       }
     } catch (error) {
-      console.error(`[Push] ❌ Error sending to token:`, error.message);
+      console.error(`[Push] Error sending to token:`, error.message);
     }
   }
   
   stats.notificationsSent += successCount;
-  console.log(`[Push] ✅ Sent ${successCount}/${pushTokens.size} notifications (${fcmCount} FCM, ${expoCount} Expo)`);
+  console.log(`[Push] Sent ${successCount}/${pushTokens.size} notifications (${fcmCount} FCM, ${expoCount} Expo)`);
 }
 
 // Send push notifications to all registered tokens (legacy frigate/events format)
