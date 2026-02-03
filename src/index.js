@@ -11,6 +11,10 @@ const { version } = require('../package.json');
 console.log(`[Bridge] Aviant Push Bridge v${version}`);
 console.log(`[Bridge] Starting up...`);
 
+// Log timezone configuration
+const timezone = process.env.TZ || 'System default';
+console.log(`[Bridge] Timezone: ${timezone}`);
+
 // Configuration
 const config = {
   mqtt: {

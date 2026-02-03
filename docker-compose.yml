@@ -3,7 +3,7 @@ version: '3.8'
 services:
   aviant-push-bridge:
     # Use pre-built image from GitHub Container Registry
-    image: ghcr.io/your-username/aviant-push-bridge:latest
+    image: ghcr.io/wjbeckett/aviant-push-bridge:latest
     container_name: aviant-push-bridge
     restart: unless-stopped
     ports:
@@ -12,6 +12,7 @@ services:
       # Persist configuration and push token registrations
       - ./data:/app/data
     environment:
+      - TZ=America/New_York
       # ============================================
       # REQUIRED: MQTT Broker Connection
       # ============================================
