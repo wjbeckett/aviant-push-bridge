@@ -205,7 +205,7 @@ app.get('/health', (req, res) => {
 
 // Register push token endpoint (with optional device metadata)
 app.post('/register', (req, res) => {
-  const { pushToken, deviceName, deviceModel, platform, notificationType } = req.body;
+  const { pushToken, deviceName, deviceModel, platform, notificationType, imageMode } = req.body;
   
   // Validate token format
   if (!pushToken || typeof pushToken !== 'string' || pushToken.length < 10) {
@@ -236,6 +236,7 @@ app.post('/register', (req, res) => {
       title: '{label} detected on {camera}',
       body: 'Motion in {zones} at {time}',
     },
+    imageMode: imageMode || existingDevice?.imageMode || 'static', // 'static' or 'animated'
   };
   
   pushTokens.add(pushToken);
@@ -448,6 +449,40 @@ app.put('/devices/:token/preferences', (req, res) => {
     success: true, 
     message: 'Preferences updated successfully',
     templates: device.templates,
+  });
+});
+
+// Update device image mode (static or animated)
+app.put('/devices/:token/image-mode', (req, res) => {
+  const { token } = req.params;
+  const { imageMode } = req.body;
+  
+  // Find device by full token match
+  const device = devices.get(token);
+  
+  if (!device) {
+    return res.status(404).json({ error: 'Device not found. Ensure you are registered first.' });
+  }
+  
+  // Validate imageMode
+  if (!imageMode || (imageMode !== 'static' && imageMode !== 'animated')) {
+    return res.status(400).json({ error: 'imageMode must be either "static" or "animated"' });
+  }
+  
+  // Update image mode
+  device.imageMode = imageMode;
+  devices.set(token, device);
+  saveDevices();
+  
+  console.log(`[Bridge] Updated image mode for device: ${device.name} → ${imageMode}`);
+  
+  res.json({ 
+    success: true, 
+    message: 'Image mode updated successfully',
+    device: {
+      name: device.name,
+      imageMode: device.imageMode,
+    },
   });
 });
 
@@ -1070,7 +1105,7 @@ function isFCMToken(token) {
  */
 async function sendFCMNotification(fcmToken, notificationData) {
   try {
-    const { title, body, thumbnailUrl, jwtToken, camera, reviewId, eventId, timestamp, severity, isImageUpdate } = notificationData;
+    const { title, body, thumbnailUrl, jwtToken, camera, reviewId, eventId, timestamp, severity, isImageUpdate, imageMode } = notificationData;
 
     // Create notification tag for update/replace behavior
     // Only alerts get notifications, so tag is always reviewId_alert
@@ -1101,6 +1136,7 @@ async function sendFCMNotification(fcmToken, notificationData) {
           severity: severity || 'alert',
           notificationType: 'frigate_alert',
           notificationTag: notificationTag, // For Android grouping/replacing
+          imageMode: imageMode || 'static', // 'static' or 'animated' - tells app which image to fetch
         },
         // High priority for data-only messages (required for background delivery)
         android: {
@@ -1245,7 +1281,7 @@ async function sendReviewNotification(review) {
     if (bridgeConfig.frigateJwtToken) {
       thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
     }
-    console.log(`[Push] Review thumbnail (webp): ${cleanPath}`);
+    console.log(`[Push] ✅ Review thumbnail (webp): ${cleanPath}`);
   } else if (firstEventId && bridgeConfig.externalFrigateUrl) {
     // Option 2: Fallback to Events API (JPG) - reliable but lower quality than webp
     // Note: /api/notifications/ doesn't work, but /api/events/ does!
@@ -1258,7 +1294,7 @@ async function sendReviewNotification(review) {
   } else {
     // No thumbnail available at all
     console.log(`[Push] No thumbnail available - thumb_path missing and no event IDs`);
-    console.log(`[Push] Review ID: ${reviewId}, Detections: ${detections.length}`);
+    console.log(`[Push] No review ID: ${reviewId}, Detections: ${detections.length}`);
     console.log(`[Push] This notification will arrive WITHOUT an image`);
   }
   
@@ -1313,6 +1349,7 @@ async function sendReviewNotification(review) {
       console.log(`[Push] Device: ${device?.name || 'Unknown'} (${device?.platform || 'unknown'})`);
       console.log(`[Push]   Title: "${title}"`);
       console.log(`[Push]   Body: "${body}"`);
+      console.log(`[Push]   Image Mode: ${device?.imageMode || 'static'}`);
       
       // Prepare notification data
       const notificationData = {
@@ -1326,6 +1363,7 @@ async function sendReviewNotification(review) {
         timestamp: startTime,
         severity,
         isImageUpdate, // Flag for progressive image enhancement
+        imageMode: device?.imageMode || 'static', // 'static' or 'animated'
       };
       
       // Detect token type and send via appropriate service
