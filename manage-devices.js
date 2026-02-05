@@ -44,13 +44,13 @@ async function listDevices() {
     
     devices.forEach((device, index) => {
       console.log(`\n🔹 Device ${index + 1}:`);
-      console.log(`   Name:       ${device.deviceName || 'Unknown'}`);
-      console.log(`   Model:      ${device.deviceModel || 'Unknown'}`);
+      console.log(`   Name:       ${device.name || device.deviceName || 'Unknown'}`);
+      console.log(`   Model:      ${device.model || device.deviceModel || 'Unknown'}`);
       console.log(`   Platform:   ${device.platform || 'Unknown'}`);
       console.log(`   Token Type: ${device.tokenType || 'Unknown'}`);
       console.log(`   Token:      ${device.token}`);
       console.log(`   Registered: ${device.registeredAt || 'Unknown'}`);
-      console.log(`   Last Used:  ${device.lastUsed || 'Never'}`);
+      console.log(`   Last Seen:  ${device.lastSeen || device.lastUsed || 'Never'}`);
     });
     
     console.log('\n' + '═'.repeat(80) + '\n');
