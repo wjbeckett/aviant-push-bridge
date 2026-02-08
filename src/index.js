@@ -5,6 +5,7 @@ const express = require('express');
 const admin = require('firebase-admin');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { version } = require('../package.json');
 
 // Log version on startup
@@ -60,10 +61,90 @@ const TOKENS_FILE = path.join(DATA_DIR, 'tokens.json');
 const DEVICES_FILE = path.join(DATA_DIR, 'devices.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const API_KEY_FILE = path.join(DATA_DIR, 'api_key.json');
+const CREDENTIALS_FILE = path.join(DATA_DIR, 'frigate_credentials.enc');
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// === ENCRYPTION HELPERS FOR FRIGATE CREDENTIALS ===
+// Credentials are encrypted at rest using a key derived from AUTH_TOKEN or a generated key
+const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
+
+function getEncryptionKey() {
+  // Use AUTH_TOKEN as the base for the encryption key, or generate one
+  const baseKey = process.env.AUTH_TOKEN || 'aviant-push-bridge-default-key';
+  return crypto.createHash('sha256').update(baseKey).digest();
+}
+
+function encryptCredentials(data) {
+  const key = getEncryptionKey();
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
+  
+  let encrypted = cipher.update(JSON.stringify(data), 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  
+  const authTag = cipher.getAuthTag();
+  
+  return {
+    iv: iv.toString('hex'),
+    authTag: authTag.toString('hex'),
+    data: encrypted,
+  };
+}
+
+function decryptCredentials(encryptedData) {
+  try {
+    const key = getEncryptionKey();
+    const iv = Buffer.from(encryptedData.iv, 'hex');
+    const authTag = Buffer.from(encryptedData.authTag, 'hex');
+    
+    const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
+    decipher.setAuthTag(authTag);
+    
+    let decrypted = decipher.update(encryptedData.data, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    
+    return JSON.parse(decrypted);
+  } catch (err) {
+    console.error('[Crypto] Failed to decrypt credentials:', err.message);
+    return null;
+  }
+}
+
+// Store for Frigate credentials (encrypted at rest)
+let frigateCredentials = null; // { username, password }
+
+// Load encrypted credentials on startup
+try {
+  if (fs.existsSync(CREDENTIALS_FILE)) {
+    const encryptedData = JSON.parse(fs.readFileSync(CREDENTIALS_FILE, 'utf8'));
+    frigateCredentials = decryptCredentials(encryptedData);
+    if (frigateCredentials) {
+      console.log(`[Bridge] Frigate credentials loaded (encrypted): ${frigateCredentials.username}`);
+    }
+  }
+} catch (err) {
+  console.error('[Bridge] Error loading credentials:', err.message);
+}
+
+function saveCredentials() {
+  try {
+    if (frigateCredentials) {
+      const encrypted = encryptCredentials(frigateCredentials);
+      fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(encrypted, null, 2));
+      console.log('[Bridge] Frigate credentials saved (encrypted)');
+    } else {
+      // Delete credentials file if cleared
+      if (fs.existsSync(CREDENTIALS_FILE)) {
+        fs.unlinkSync(CREDENTIALS_FILE);
+      }
+    }
+  } catch (err) {
+    console.error('[Bridge] Error saving credentials:', err.message);
+  }
 }
 
 // Load tokens from file
@@ -72,8 +153,19 @@ try {
   if (fs.existsSync(TOKENS_FILE)) {
     const data = fs.readFileSync(TOKENS_FILE, 'utf8');
     const tokens = JSON.parse(data);
-    pushTokens = new Set(tokens);
+    
+    // Filter out legacy Expo tokens (we only use FCM now)
+    const fcmTokens = tokens.filter(token => !token.startsWith('ExponentPushToken['));
+    const removedCount = tokens.length - fcmTokens.length;
+    
+    pushTokens = new Set(fcmTokens);
     console.log(`[Bridge] Loaded ${pushTokens.size} token(s) from persistent storage`);
+    
+    if (removedCount > 0) {
+      console.log(`[Bridge] ⚠️  Removed ${removedCount} legacy Expo token(s) (FCM migration complete)`);
+      // Save cleaned tokens back to disk
+      fs.writeFileSync(TOKENS_FILE, JSON.stringify([...pushTokens], null, 2));
+    }
   }
 } catch (err) {
   console.error('[Bridge] Error loading tokens:', err.message);
@@ -85,8 +177,24 @@ try {
   if (fs.existsSync(DEVICES_FILE)) {
     const data = fs.readFileSync(DEVICES_FILE, 'utf8');
     const devicesArray = JSON.parse(data);
-    devices = new Map(devicesArray);
+    const devicesMap = new Map(devicesArray);
+    
+    // Filter out legacy Expo token devices
+    const beforeCount = devicesMap.size;
+    for (const [token] of devicesMap) {
+      if (token.startsWith('ExponentPushToken[')) {
+        devicesMap.delete(token);
+      }
+    }
+    
+    devices = devicesMap;
     console.log(`[Bridge] Loaded ${devices.size} device(s) from persistent storage`);
+    
+    if (beforeCount > devices.size) {
+      console.log(`[Bridge] ⚠️  Removed ${beforeCount - devices.size} legacy Expo device(s)`);
+      // Save cleaned devices back to disk
+      fs.writeFileSync(DEVICES_FILE, JSON.stringify([...devices], null, 2));
+    }
   }
 } catch (err) {
   console.error('[Bridge] Error loading devices:', err.message);
@@ -142,6 +250,185 @@ function saveConfig() {
     console.error('[Bridge] Error saving config:', err.message);
   }
 }
+
+// === JWT TOKEN REFRESH LOGIC ===
+
+/**
+ * Decode a JWT token (without verification) to read its payload
+ */
+function decodeJwt(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    
+    const payload = Buffer.from(parts[1], 'base64url').toString('utf8');
+    return JSON.parse(payload);
+  } catch (err) {
+    console.error('[JWT] Failed to decode token:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Check if JWT token is expired or expiring soon
+ * @param {number} thresholdSeconds - Refresh if expiring within this many seconds (default 1 hour)
+ * @returns {{ expired: boolean, expiringSoon: boolean, expiresIn: number | null }}
+ */
+function checkTokenExpiration(thresholdSeconds = 3600) {
+  if (!bridgeConfig.frigateJwtToken) {
+    return { expired: true, expiringSoon: true, expiresIn: null };
+  }
+  
+  const payload = decodeJwt(bridgeConfig.frigateJwtToken);
+  if (!payload || !payload.exp) {
+    console.warn('[JWT] Token has no expiration claim, assuming valid');
+    return { expired: false, expiringSoon: false, expiresIn: null };
+  }
+  
+  const now = Math.floor(Date.now() / 1000);
+  const expiresIn = payload.exp - now;
+  
+  return {
+    expired: expiresIn <= 0,
+    expiringSoon: expiresIn <= thresholdSeconds,
+    expiresIn,
+  };
+}
+
+/**
+ * Refresh JWT token by logging into Frigate
+ * @returns {Promise<boolean>} - True if refresh succeeded
+ */
+async function refreshFrigateToken() {
+  if (!frigateCredentials || !frigateCredentials.username || !frigateCredentials.password) {
+    console.log('[JWT] No Frigate credentials stored, cannot refresh token');
+    return false;
+  }
+  
+  const frigateUrl = bridgeConfig.externalFrigateUrl || config.frigate.url;
+  if (!frigateUrl) {
+    console.error('[JWT] No Frigate URL configured');
+    return false;
+  }
+  
+  console.log(`[JWT] Refreshing token from ${frigateUrl}...`);
+  
+  try {
+    const response = await axios.post(
+      `${frigateUrl}/api/login`,
+      { 
+        user: frigateCredentials.username, 
+        password: frigateCredentials.password 
+      },
+      { 
+        timeout: 15000,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        // Important: capture Set-Cookie header
+        maxRedirects: 0,
+        validateStatus: (status) => status >= 200 && status < 400,
+      }
+    );
+    
+    // Extract token from Set-Cookie header (Frigate uses frigate_token cookie)
+    let token = null;
+    const setCookieHeader = response.headers['set-cookie'];
+    
+    if (setCookieHeader) {
+      const cookies = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
+      for (const cookie of cookies) {
+        const match = cookie.match(/frigate_token=([^;]+)/);
+        if (match) {
+          token = match[1];
+          break;
+        }
+      }
+    }
+    
+    // Fallback: check response body
+    if (!token) {
+      token = response.data?.access_token || response.data?.token;
+    }
+    
+    if (token) {
+      bridgeConfig.frigateJwtToken = token;
+      saveConfig();
+      
+      const expCheck = checkTokenExpiration();
+      console.log(`[JWT] ✅ Token refreshed successfully`);
+      console.log(`[JWT] Token preview: ${token.substring(0, 30)}...`);
+      if (expCheck.expiresIn) {
+        const hours = Math.floor(expCheck.expiresIn / 3600);
+        const mins = Math.floor((expCheck.expiresIn % 3600) / 60);
+        console.log(`[JWT] Expires in: ${hours}h ${mins}m`);
+      }
+      return true;
+    } else {
+      console.error('[JWT] No token found in Frigate login response');
+      return false;
+    }
+    
+  } catch (err) {
+    console.error('[JWT] Token refresh failed:', err.response?.status || err.message);
+    if (err.response?.status === 401) {
+      console.error('[JWT] Invalid credentials - please update Frigate credentials from the app');
+    }
+    return false;
+  }
+}
+
+/**
+ * Periodic token refresh check
+ * Runs every 30 minutes, refreshes if token expires within 1 hour
+ */
+let tokenRefreshInterval = null;
+
+function startTokenRefreshScheduler() {
+  // Check every 30 minutes
+  const CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+  const REFRESH_THRESHOLD_SECONDS = 60 * 60; // 1 hour before expiration
+  
+  console.log('[JWT] Starting automatic token refresh scheduler (checks every 30 min)');
+  
+  // Initial check on startup
+  setTimeout(async () => {
+    if (frigateCredentials) {
+      const expCheck = checkTokenExpiration(REFRESH_THRESHOLD_SECONDS);
+      
+      if (expCheck.expired) {
+        console.log('[JWT] Token is expired, refreshing...');
+        await refreshFrigateToken();
+      } else if (expCheck.expiringSoon) {
+        const mins = Math.floor(expCheck.expiresIn / 60);
+        console.log(`[JWT] Token expires in ${mins} min, refreshing...`);
+        await refreshFrigateToken();
+      } else if (expCheck.expiresIn) {
+        const hours = Math.floor(expCheck.expiresIn / 3600);
+        const mins = Math.floor((expCheck.expiresIn % 3600) / 60);
+        console.log(`[JWT] Token is valid (expires in ${hours}h ${mins}m)`);
+      }
+    }
+  }, 5000); // 5 second delay on startup
+  
+  // Periodic check
+  tokenRefreshInterval = setInterval(async () => {
+    if (!frigateCredentials) {
+      return; // No credentials stored, skip
+    }
+    
+    const expCheck = checkTokenExpiration(REFRESH_THRESHOLD_SECONDS);
+    
+    if (expCheck.expired || expCheck.expiringSoon) {
+      const reason = expCheck.expired ? 'expired' : `expiring in ${Math.floor(expCheck.expiresIn / 60)} min`;
+      console.log(`[JWT] Token ${reason}, refreshing...`);
+      await refreshFrigateToken();
+    }
+  }, CHECK_INTERVAL_MS);
+}
+
+// Start the scheduler
+startTokenRefreshScheduler();
 
 // Cooldown tracking to prevent notification spam
 const notificationCooldowns = new Map();
@@ -245,7 +532,7 @@ app.post('/register', (req, res) => {
   saveTokens();
   saveDevices();
   
-  console.log(`[Bridge] Registered device: ${deviceInfo.name} (${deviceInfo.model}) - Token type: ${tokenType}`);
+  console.log(`[Bridge] ✅ Registered device: ${deviceInfo.name} (${deviceInfo.model}) - Token type: ${tokenType}`);
   console.log(`[Bridge] Total registered devices: ${pushTokens.size}`);
   
   res.json({ 
@@ -322,7 +609,7 @@ app.post('/test-notification', async (req, res) => {
         timeout: 10000,
       });
       
-      console.log('[Bridge] Test notification sent via proxy:', response.data);
+      console.log('[Bridge] ✅ Test notification sent via proxy:', response.data);
       
       return res.json({ 
         success: true, 
@@ -349,7 +636,7 @@ app.post('/test-notification', async (req, res) => {
         timeout: 10000,
       });
       
-      console.log('[Bridge] Test Expo notification sent:', expoPushResponse.data);
+      console.log('[Bridge] ✅ Test Expo notification sent:', expoPushResponse.data);
       
       return res.json({ 
         success: true, 
@@ -358,7 +645,7 @@ app.post('/test-notification', async (req, res) => {
       });
     }
   } catch (error) {
-    console.error('[Bridge] Failed to send test notification:', error.message);
+    console.error('[Bridge] ❌ Failed to send test notification:', error.message);
     if (error.response) {
       console.error('[Bridge] Proxy response:', error.response.status, error.response.data);
     }
@@ -498,8 +785,9 @@ app.get('/config', (req, res) => {
 });
 
 // Update Frigate JWT token (sent from mobile app)
-app.post('/config/frigate-token', (req, res) => {
-  const { token, externalUrl } = req.body;
+// Now also accepts credentials for automatic token refresh
+app.post('/config/frigate-token', async (req, res) => {
+  const { token, externalUrl, credentials } = req.body;
   
   if (!token || typeof token !== 'string' || token.length < 20) {
     return res.status(400).json({ error: 'Invalid JWT token format' });
@@ -511,6 +799,16 @@ app.post('/config/frigate-token', (req, res) => {
     bridgeConfig.externalFrigateUrl = externalUrl;
   }
   
+  // Store credentials for automatic refresh (encrypted)
+  if (credentials && credentials.username && credentials.password) {
+    frigateCredentials = {
+      username: credentials.username,
+      password: credentials.password,
+    };
+    saveCredentials();
+    console.log(`[Bridge] Frigate credentials stored for auto-refresh: ${credentials.username}`);
+  }
+  
   saveConfig();
   
   console.log(`[Bridge] Frigate JWT token updated: ${token.substring(0, 20)}...`);
@@ -518,18 +816,140 @@ app.post('/config/frigate-token', (req, res) => {
     console.log(`[Bridge] External Frigate URL updated: ${externalUrl}`);
   }
   
+  // Check token expiration
+  const expCheck = checkTokenExpiration();
+  let expiresInStr = null;
+  if (expCheck.expiresIn) {
+    const hours = Math.floor(expCheck.expiresIn / 3600);
+    const mins = Math.floor((expCheck.expiresIn % 3600) / 60);
+    expiresInStr = `${hours}h ${mins}m`;
+  }
+  
   res.json({ 
     success: true, 
     message: 'Frigate configuration updated successfully',
     configured: true,
+    autoRefreshEnabled: !!frigateCredentials,
+    tokenExpiresIn: expiresInStr,
   });
 });
 
 // Get Frigate token status
 app.get('/config/frigate-token', (req, res) => {
+  const expCheck = checkTokenExpiration();
+  let expiresInStr = null;
+  let status = 'not_configured';
+  
+  if (bridgeConfig.frigateJwtToken) {
+    if (expCheck.expired) {
+      status = 'expired';
+    } else if (expCheck.expiringSoon) {
+      status = 'expiring_soon';
+    } else {
+      status = 'valid';
+    }
+    
+    if (expCheck.expiresIn) {
+      const hours = Math.floor(expCheck.expiresIn / 3600);
+      const mins = Math.floor((expCheck.expiresIn % 3600) / 60);
+      expiresInStr = `${hours}h ${mins}m`;
+    }
+  }
+  
   res.json({
     configured: !!bridgeConfig.frigateJwtToken,
     externalFrigateUrl: bridgeConfig.externalFrigateUrl,
+    autoRefreshEnabled: !!frigateCredentials,
+    credentialsUsername: frigateCredentials?.username || null,
+    tokenStatus: status,
+    tokenExpiresIn: expiresInStr,
+  });
+});
+
+// Manually trigger token refresh
+app.post('/config/frigate-token/refresh', async (req, res) => {
+  if (!frigateCredentials) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'No credentials stored. Send credentials with token to enable auto-refresh.' 
+    });
+  }
+  
+  console.log('[API] Manual token refresh requested');
+  const success = await refreshFrigateToken();
+  
+  if (success) {
+    const expCheck = checkTokenExpiration();
+    let expiresInStr = null;
+    if (expCheck.expiresIn) {
+      const hours = Math.floor(expCheck.expiresIn / 3600);
+      const mins = Math.floor((expCheck.expiresIn % 3600) / 60);
+      expiresInStr = `${hours}h ${mins}m`;
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Token refreshed successfully',
+      tokenExpiresIn: expiresInStr,
+    });
+  } else {
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to refresh token. Check credentials or Frigate server.' 
+    });
+  }
+});
+
+// Update or clear Frigate credentials for auto-refresh
+app.post('/config/frigate-credentials', async (req, res) => {
+  const { username, password, clear } = req.body;
+  
+  if (clear) {
+    frigateCredentials = null;
+    saveCredentials();
+    console.log('[Bridge] Frigate credentials cleared');
+    return res.json({ 
+      success: true, 
+      message: 'Credentials cleared. Auto-refresh disabled.',
+      autoRefreshEnabled: false,
+    });
+  }
+  
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password required' });
+  }
+  
+  frigateCredentials = { username, password };
+  saveCredentials();
+  console.log(`[Bridge] Frigate credentials updated: ${username}`);
+  
+  // Optionally refresh token immediately
+  const { refreshNow } = req.body;
+  if (refreshNow) {
+    const success = await refreshFrigateToken();
+    if (!success) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Credentials saved but token refresh failed. Check username/password.',
+        autoRefreshEnabled: true,
+      });
+    }
+  }
+  
+  res.json({ 
+    success: true, 
+    message: 'Credentials saved. Auto-refresh enabled.',
+    autoRefreshEnabled: true,
+    username: username,
+  });
+});
+
+// Get credentials status (not the actual password!)
+app.get('/config/frigate-credentials', (req, res) => {
+  res.json({
+    configured: !!frigateCredentials,
+    username: frigateCredentials?.username || null,
+    autoRefreshEnabled: !!frigateCredentials,
   });
 });
 
@@ -682,7 +1102,7 @@ async function ensureApiKey() {
     
     console.log('');
     console.log('╔═══════════════════════════════════════════════════════════╗');
-    console.log('║         REGISTRATION SUCCESSFUL                        ║');
+    console.log('║         ✅ REGISTRATION SUCCESSFUL                        ║');
     console.log('╚═══════════════════════════════════════════════════════════╝');
     console.log('');
     if (isExisting) {
@@ -691,15 +1111,15 @@ async function ensureApiKey() {
       console.log('  Your bridge is now registered with the notification proxy!');
     }
     console.log('');
-    console.log('  Your API Key:');
+    console.log('  📋 Your API Key:');
     console.log('  ┌─────────────────────────────────────────────────────────┐');
     console.log(`  │ ${apiKey} │`);
     console.log('  └─────────────────────────────────────────────────────────┘');
     console.log('');
-    console.log('  This key is saved in:', API_KEY_FILE);
-    console.log('  Anonymous mode: 100 notifications/day');
-    console.log('  To link to an account (optional):');
-    console.log(`  Visit: https://notify.aviant.app/link?key=${apiKey.substring(0, 16)}...`);
+    console.log('  ℹ️  This key is saved in:', API_KEY_FILE);
+    console.log('  ℹ️  Anonymous mode: 100 notifications/day');
+    console.log('  ℹ️  To link to an account (optional):');
+    console.log(`  ℹ️  Visit: https://notify.aviant.app/link?key=${apiKey.substring(0, 16)}...`);
     console.log('');
     console.log('═══════════════════════════════════════════════════════════');
     console.log('');
@@ -709,7 +1129,7 @@ async function ensureApiKey() {
   } catch (error) {
     console.error('');
     console.error('╔═══════════════════════════════════════════════════════════╗');
-    console.error('║         REGISTRATION FAILED                            ║');
+    console.error('║         ❌ REGISTRATION FAILED                            ║');
     console.error('╚═══════════════════════════════════════════════════════════╝');
     console.error('');
     console.error('  Error:', error.message);
@@ -741,16 +1161,16 @@ async function ensureApiKey() {
   NOTIFICATION_PROXY_TOKEN = await ensureApiKey();
   
   if (!NOTIFICATION_PROXY_TOKEN) {
-    console.error('[Bridge] Starting without notification proxy access');
-    console.error('[Bridge] Push notifications will NOT work');
+    console.error('[Bridge] ⚠️  Starting without notification proxy access');
+    console.error('[Bridge] ⚠️  Push notifications will NOT work');
   } else {
-    console.log('[Bridge] Notification proxy ready');
+    console.log('[Bridge] ✅ Notification proxy ready');
   }
   
   // Step 2: Start Express server
   console.log('[Bridge] Step 2: Starting HTTP server...');
   app.listen(config.bridge.port, () => {
-    console.log(`[Bridge] HTTP server listening on port ${config.bridge.port}`);
+    console.log(`[Bridge] ✅ HTTP server listening on port ${config.bridge.port}`);
     console.log(`[Bridge] Health check: http://localhost:${config.bridge.port}/health`);
   });
 
@@ -780,7 +1200,7 @@ client.on('connect', () => {
       
       // Log recommendation if using old events topic
       if (config.mqtt.topic === 'frigate/events') {
-        console.log('[MQTT] Using frigate/events topic. Consider switching to frigate/reviews for better notification management.');
+        console.log('[MQTT] ⚠️  Using frigate/events topic. Consider switching to frigate/reviews for better notification management.');
       }
     }
   });
@@ -1165,21 +1585,21 @@ async function sendFCMNotification(fcmToken, notificationData) {
       });
 
       if (response.data.success) {
-        console.log('[Proxy] Notification sent successfully:', response.data.messageId);
+        console.log('[Proxy] ✅ Notification sent successfully:', response.data.messageId);
         return true;
       } else {
-        console.error('[Proxy] Failed to send notification:', response.data.error);
+        console.error('[Proxy] ❌ Failed to send notification:', response.data.error);
         return false;
       }
     }
 
     // No direct FCM fallback - proxy is required
-    console.error('[Notification] Proxy failed and no fallback configured');
+    console.error('[Notification] ❌ Proxy failed and no fallback configured');
     console.error('[Notification] Please ensure your Cloudflare Worker proxy is running');
     return false;
 
   } catch (error) {
-    console.error('[Notification] Failed to send:', error.message);
+    console.error('[Notification] ❌ Failed to send:', error.message);
     if (error.response) {
       console.error('[Notification] Response status:', error.response.status);
       console.error('[Notification] Response data:', error.response.data);
@@ -1238,15 +1658,15 @@ async function sendExpoPushNotification(expoToken, notificationData) {
     if (response.data && response.data.data && response.data.data[0]) {
       const result = response.data.data[0];
       if (result.status === 'ok') {
-        console.log('[Expo] Message sent:', result.id);
+        console.log('[Expo] ✅ Message sent:', result.id);
         return true;
       } else {
-        console.error('[Expo] Error:', result.message);
+        console.error('[Expo] ❌ Error:', result.message);
         return false;
       }
     }
   } catch (error) {
-    console.error('[Expo] Failed to send:', error.message);
+    console.error('[Expo] ❌ Failed to send:', error.message);
     return false;
   }
 }
@@ -1290,12 +1710,12 @@ async function sendReviewNotification(review) {
     if (bridgeConfig.frigateJwtToken) {
       thumbnailUrl += `?token=${bridgeConfig.frigateJwtToken}`;
     }
-    console.log(`[Push] Events API fallback (JPG) - event: ${firstEventId}`);
+    console.log(`[Push] ⚠️  Events API fallback (JPG) - event: ${firstEventId}`);
   } else {
     // No thumbnail available at all
-    console.log(`[Push] No thumbnail available - thumb_path missing and no event IDs`);
-    console.log(`[Push] No review ID: ${reviewId}, Detections: ${detections.length}`);
-    console.log(`[Push] This notification will arrive WITHOUT an image`);
+    console.log(`[Push] ❌ No thumbnail available - thumb_path missing and no event IDs`);
+    console.log(`[Push] ❌ Review ID: ${reviewId}, Detections: ${detections.length}`);
+    console.log(`[Push] ❌ This notification will arrive WITHOUT an image`);
   }
   
   // Format camera name
@@ -1379,12 +1799,12 @@ async function sendReviewNotification(review) {
         if (success) successCount++;
       }
     } catch (error) {
-      console.error(`[Push] Error sending to token:`, error.message);
+      console.error(`[Push] ❌ Error sending to token:`, error.message);
     }
   }
   
   stats.notificationsSent += successCount;
-  console.log(`[Push] Sent ${successCount}/${pushTokens.size} notifications (${fcmCount} FCM, ${expoCount} Expo)`);
+  console.log(`[Push] ✅ Sent ${successCount}/${pushTokens.size} notifications (${fcmCount} FCM, ${expoCount} Expo)`);
 }
 
 // Send push notifications to all registered tokens (legacy frigate/events format)
