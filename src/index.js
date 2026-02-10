@@ -62,6 +62,7 @@ const DEVICES_FILE = path.join(DATA_DIR, 'devices.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const API_KEY_FILE = path.join(DATA_DIR, 'api_key.json');
 const CREDENTIALS_FILE = path.join(DATA_DIR, 'frigate_credentials.enc');
+const DEVICE_CREDENTIALS_FILE = path.join(DATA_DIR, 'device_credentials.enc'); // Per-device credentials
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -115,19 +116,42 @@ function decryptCredentials(encryptedData) {
 }
 
 // Store for Frigate credentials (encrypted at rest)
+// LEGACY: Global credentials (for backward compatibility)
 let frigateCredentials = null; // { username, password }
 
-// Load encrypted credentials on startup
+// NEW: Per-device credentials storage (Map: deviceToken -> { username, password, jwtToken, externalUrl, lastRefresh })
+let deviceCredentials = new Map();
+
+// Load encrypted credentials on startup (LEGACY global)
 try {
   if (fs.existsSync(CREDENTIALS_FILE)) {
     const encryptedData = JSON.parse(fs.readFileSync(CREDENTIALS_FILE, 'utf8'));
     frigateCredentials = decryptCredentials(encryptedData);
     if (frigateCredentials) {
-      console.log(`[Bridge] Frigate credentials loaded (encrypted): ${frigateCredentials.username}`);
+      console.log(`[Bridge] LEGACY global credentials loaded: ${frigateCredentials.username}`);
     }
   }
 } catch (err) {
-  console.error('[Bridge] Error loading credentials:', err.message);
+  console.error('[Bridge] Error loading legacy credentials:', err.message);
+}
+
+// Load per-device credentials on startup
+try {
+  if (fs.existsSync(DEVICE_CREDENTIALS_FILE)) {
+    const encryptedData = JSON.parse(fs.readFileSync(DEVICE_CREDENTIALS_FILE, 'utf8'));
+    const decrypted = decryptCredentials(encryptedData);
+    if (decrypted && Array.isArray(decrypted)) {
+      deviceCredentials = new Map(decrypted);
+      console.log(`[Bridge] Loaded credentials for ${deviceCredentials.size} device(s)`);
+      // Log device usernames
+      for (const [token, creds] of deviceCredentials) {
+        const tokenPreview = token.substring(0, 20) + '...';
+        console.log(`[Bridge]   - ${tokenPreview}: ${creds.username}`);
+      }
+    }
+  }
+} catch (err) {
+  console.error('[Bridge] Error loading device credentials:', err.message);
 }
 
 function saveCredentials() {
@@ -135,7 +159,7 @@ function saveCredentials() {
     if (frigateCredentials) {
       const encrypted = encryptCredentials(frigateCredentials);
       fs.writeFileSync(CREDENTIALS_FILE, JSON.stringify(encrypted, null, 2));
-      console.log('[Bridge] Frigate credentials saved (encrypted)');
+      console.log('[Bridge] LEGACY global credentials saved');
     } else {
       // Delete credentials file if cleared
       if (fs.existsSync(CREDENTIALS_FILE)) {
@@ -145,6 +169,55 @@ function saveCredentials() {
   } catch (err) {
     console.error('[Bridge] Error saving credentials:', err.message);
   }
+}
+
+function saveDeviceCredentials() {
+  try {
+    if (deviceCredentials.size > 0) {
+      const dataArray = Array.from(deviceCredentials.entries());
+      const encrypted = encryptCredentials(dataArray);
+      fs.writeFileSync(DEVICE_CREDENTIALS_FILE, JSON.stringify(encrypted, null, 2));
+      console.log(`[Bridge] Per-device credentials saved (${deviceCredentials.size} device(s))`);
+    } else {
+      if (fs.existsSync(DEVICE_CREDENTIALS_FILE)) {
+        fs.unlinkSync(DEVICE_CREDENTIALS_FILE);
+      }
+    }
+  } catch (err) {
+    console.error('[Bridge] Error saving device credentials:', err.message);
+  }
+}
+
+/**
+ * Get credentials for a specific device, with fallback to global credentials
+ * @param {string} deviceToken - The device's push token
+ * @returns {object|null} - Credentials object or null
+ */
+function getCredentialsForDevice(deviceToken) {
+  // Priority 1: Per-device credentials
+  if (deviceToken && deviceCredentials.has(deviceToken)) {
+    return deviceCredentials.get(deviceToken);
+  }
+  // Priority 2: Fallback to global credentials (legacy)
+  if (frigateCredentials) {
+    return { ...frigateCredentials, jwtToken: bridgeConfig.frigateJwtToken, externalUrl: bridgeConfig.externalFrigateUrl };
+  }
+  return null;
+}
+
+/**
+ * Get JWT token for a specific device, with fallback to global token
+ * @param {string} deviceToken - The device's push token
+ * @returns {string|null} - JWT token or null
+ */
+function getJwtForDevice(deviceToken) {
+  // Priority 1: Per-device JWT
+  if (deviceToken && deviceCredentials.has(deviceToken)) {
+    const creds = deviceCredentials.get(deviceToken);
+    if (creds.jwtToken) return creds.jwtToken;
+  }
+  // Priority 2: Fallback to global JWT (legacy)
+  return bridgeConfig.frigateJwtToken;
 }
 
 // Load tokens from file
@@ -297,15 +370,37 @@ function checkTokenExpiration(thresholdSeconds = 3600) {
 
 /**
  * Refresh JWT token by logging into Frigate
+ * Now supports per-device refresh for multi-user support
+ * @param {string|null} deviceToken - Optional device token for per-device refresh
  * @returns {Promise<boolean>} - True if refresh succeeded
  */
-async function refreshFrigateToken() {
-  if (!frigateCredentials || !frigateCredentials.username || !frigateCredentials.password) {
-    console.log('[JWT] No Frigate credentials stored, cannot refresh token');
+async function refreshFrigateToken(deviceToken = null) {
+  let credentials;
+  let frigateUrl;
+  let isPerDevice = false;
+  
+  // Determine which credentials to use
+  if (deviceToken && deviceCredentials.has(deviceToken)) {
+    // Per-device credentials
+    credentials = deviceCredentials.get(deviceToken);
+    frigateUrl = credentials.externalUrl || bridgeConfig.externalFrigateUrl || config.frigate.url;
+    isPerDevice = true;
+    console.log(`[JWT] Refreshing token for device: ${deviceToken.substring(0, 20)}... (user: ${credentials.username})`);
+  } else if (frigateCredentials) {
+    // Legacy global credentials
+    credentials = frigateCredentials;
+    frigateUrl = bridgeConfig.externalFrigateUrl || config.frigate.url;
+    console.log(`[JWT] Refreshing LEGACY global token (user: ${credentials.username})`);
+  } else {
+    console.log('[JWT] No credentials available for refresh');
     return false;
   }
   
-  const frigateUrl = bridgeConfig.externalFrigateUrl || config.frigate.url;
+  if (!credentials?.username || !credentials?.password) {
+    console.log('[JWT] Invalid credentials (missing username/password)');
+    return false;
+  }
+  
   if (!frigateUrl) {
     console.error('[JWT] No Frigate URL configured');
     return false;
@@ -317,8 +412,8 @@ async function refreshFrigateToken() {
     const response = await axios.post(
       `${frigateUrl}/api/login`,
       { 
-        user: frigateCredentials.username, 
-        password: frigateCredentials.password 
+        user: credentials.username, 
+        password: credentials.password 
       },
       { 
         timeout: 15000,
@@ -352,17 +447,31 @@ async function refreshFrigateToken() {
     }
     
     if (token) {
-      bridgeConfig.frigateJwtToken = token;
-      saveConfig();
+      if (isPerDevice) {
+        // Update per-device token
+        credentials.jwtToken = token;
+        credentials.lastRefresh = Date.now();
+        deviceCredentials.set(deviceToken, credentials);
+        saveDeviceCredentials();
+        console.log(`[JWT] ✅ Per-device token refreshed (${credentials.username})`);
+      } else {
+        // Update global token (legacy)
+        bridgeConfig.frigateJwtToken = token;
+        saveConfig();
+        console.log(`[JWT] ✅ Global token refreshed`);
+      }
       
-      const expCheck = checkTokenExpiration();
-      console.log(`[JWT] ✅ Token refreshed successfully`);
       console.log(`[JWT] Token preview: ${token.substring(0, 30)}...`);
-      if (expCheck.expiresIn) {
-        const hours = Math.floor(expCheck.expiresIn / 3600);
-        const mins = Math.floor((expCheck.expiresIn % 3600) / 60);
+      
+      // Check expiration
+      const payload = decodeJwt(token);
+      if (payload?.exp) {
+        const expiresIn = payload.exp - Math.floor(Date.now() / 1000);
+        const hours = Math.floor(expiresIn / 3600);
+        const mins = Math.floor((expiresIn % 3600) / 60);
         console.log(`[JWT] Expires in: ${hours}h ${mins}m`);
       }
+      
       return true;
     } else {
       console.error('[JWT] No token found in Frigate login response');
@@ -372,17 +481,104 @@ async function refreshFrigateToken() {
   } catch (err) {
     console.error('[JWT] Token refresh failed:', err.response?.status || err.message);
     if (err.response?.status === 401) {
-      console.error('[JWT] Invalid credentials - please update Frigate credentials from the app');
+      console.error(`[JWT] Invalid credentials for ${credentials.username} - please update from the app`);
     }
     return false;
   }
 }
 
 /**
+ * Check token expiration for a specific device or global token
+ * @param {string|null} deviceToken - Optional device token
+ * @param {number} thresholdSeconds - Seconds before expiration to consider "expiring soon"
+ */
+function checkTokenExpirationForDevice(deviceToken, thresholdSeconds = 3600) {
+  let token;
+  
+  if (deviceToken && deviceCredentials.has(deviceToken)) {
+    token = deviceCredentials.get(deviceToken).jwtToken;
+  } else {
+    token = bridgeConfig.frigateJwtToken;
+  }
+  
+  if (!token) {
+    return { expired: true, expiringSoon: true, expiresIn: null };
+  }
+  
+  const payload = decodeJwt(token);
+  if (!payload || !payload.exp) {
+    return { expired: false, expiringSoon: false, expiresIn: null };
+  }
+  
+  const now = Math.floor(Date.now() / 1000);
+  const expiresIn = payload.exp - now;
+  
+  return {
+    expired: expiresIn <= 0,
+    expiringSoon: expiresIn <= thresholdSeconds,
+    expiresIn,
+  };
+}
+
+/**
  * Periodic token refresh check
  * Runs every 30 minutes, refreshes if token expires within 1 hour
+ * Now supports multi-user: refreshes tokens for all registered devices
  */
 let tokenRefreshInterval = null;
+
+async function refreshAllDeviceTokens(thresholdSeconds) {
+  let refreshedCount = 0;
+  let failedCount = 0;
+  
+  // Refresh per-device tokens
+  if (deviceCredentials.size > 0) {
+    console.log(`[JWT] Checking ${deviceCredentials.size} device credential(s)...`);
+    
+    for (const [deviceToken, creds] of deviceCredentials) {
+      const expCheck = checkTokenExpirationForDevice(deviceToken, thresholdSeconds);
+      const tokenPreview = deviceToken.substring(0, 20) + '...';
+      
+      if (expCheck.expired || expCheck.expiringSoon) {
+        const reason = expCheck.expired ? 'expired' : `expiring in ${Math.floor(expCheck.expiresIn / 60)} min`;
+        console.log(`[JWT] Device ${tokenPreview} (${creds.username}): token ${reason}`);
+        
+        const success = await refreshFrigateToken(deviceToken);
+        if (success) {
+          refreshedCount++;
+        } else {
+          failedCount++;
+        }
+        
+        // Small delay between refreshes to avoid hammering the server
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } else if (expCheck.expiresIn) {
+        const hours = Math.floor(expCheck.expiresIn / 3600);
+        const mins = Math.floor((expCheck.expiresIn % 3600) / 60);
+        console.log(`[JWT] Device ${tokenPreview} (${creds.username}): valid (${hours}h ${mins}m)`);
+      }
+    }
+  }
+  
+  // Also refresh legacy global token if it exists
+  if (frigateCredentials && !deviceCredentials.size) {
+    const expCheck = checkTokenExpiration(thresholdSeconds);
+    
+    if (expCheck.expired || expCheck.expiringSoon) {
+      const reason = expCheck.expired ? 'expired' : `expiring in ${Math.floor(expCheck.expiresIn / 60)} min`;
+      console.log(`[JWT] LEGACY global token ${reason}`);
+      
+      const success = await refreshFrigateToken(null);
+      if (success) {
+        refreshedCount++;
+      } else {
+        failedCount++;
+      }
+    }
+  }
+  
+  return { refreshedCount, failedCount };
+}
 
 function startTokenRefreshScheduler() {
   // Check every 30 minutes
@@ -390,39 +586,31 @@ function startTokenRefreshScheduler() {
   const REFRESH_THRESHOLD_SECONDS = 60 * 60; // 1 hour before expiration
   
   console.log('[JWT] Starting automatic token refresh scheduler (checks every 30 min)');
+  console.log(`[JWT] Multi-user mode: ${deviceCredentials.size} device(s) registered`);
   
   // Initial check on startup
   setTimeout(async () => {
-    if (frigateCredentials) {
-      const expCheck = checkTokenExpiration(REFRESH_THRESHOLD_SECONDS);
-      
-      if (expCheck.expired) {
-        console.log('[JWT] Token is expired, refreshing...');
-        await refreshFrigateToken();
-      } else if (expCheck.expiringSoon) {
-        const mins = Math.floor(expCheck.expiresIn / 60);
-        console.log(`[JWT] Token expires in ${mins} min, refreshing...`);
-        await refreshFrigateToken();
-      } else if (expCheck.expiresIn) {
-        const hours = Math.floor(expCheck.expiresIn / 3600);
-        const mins = Math.floor((expCheck.expiresIn % 3600) / 60);
-        console.log(`[JWT] Token is valid (expires in ${hours}h ${mins}m)`);
+    const hasCredentials = deviceCredentials.size > 0 || frigateCredentials;
+    if (hasCredentials) {
+      console.log('[JWT] Initial token check...');
+      const result = await refreshAllDeviceTokens(REFRESH_THRESHOLD_SECONDS);
+      if (result.refreshedCount > 0 || result.failedCount > 0) {
+        console.log(`[JWT] Initial refresh: ${result.refreshedCount} succeeded, ${result.failedCount} failed`);
       }
     }
   }, 5000); // 5 second delay on startup
   
   // Periodic check
   tokenRefreshInterval = setInterval(async () => {
-    if (!frigateCredentials) {
+    const hasCredentials = deviceCredentials.size > 0 || frigateCredentials;
+    if (!hasCredentials) {
       return; // No credentials stored, skip
     }
     
-    const expCheck = checkTokenExpiration(REFRESH_THRESHOLD_SECONDS);
-    
-    if (expCheck.expired || expCheck.expiringSoon) {
-      const reason = expCheck.expired ? 'expired' : `expiring in ${Math.floor(expCheck.expiresIn / 60)} min`;
-      console.log(`[JWT] Token ${reason}, refreshing...`);
-      await refreshFrigateToken();
+    console.log('[JWT] Periodic token refresh check...');
+    const result = await refreshAllDeviceTokens(REFRESH_THRESHOLD_SECONDS);
+    if (result.refreshedCount > 0 || result.failedCount > 0) {
+      console.log(`[JWT] Refresh complete: ${result.refreshedCount} succeeded, ${result.failedCount} failed`);
     }
   }, CHECK_INTERVAL_MS);
 }
@@ -785,39 +973,63 @@ app.get('/config', (req, res) => {
 });
 
 // Update Frigate JWT token (sent from mobile app)
-// Now also accepts credentials for automatic token refresh
+// Now supports multi-user: credentials stored per-device when deviceToken is provided
 app.post('/config/frigate-token', async (req, res) => {
-  const { token, externalUrl, credentials } = req.body;
+  const { token, externalUrl, credentials, deviceToken } = req.body;
   
   if (!token || typeof token !== 'string' || token.length < 20) {
     return res.status(400).json({ error: 'Invalid JWT token format' });
   }
   
-  bridgeConfig.frigateJwtToken = token;
+  let isPerDevice = false;
   
-  if (externalUrl) {
-    bridgeConfig.externalFrigateUrl = externalUrl;
-  }
-  
-  // Store credentials for automatic refresh (encrypted)
-  if (credentials && credentials.username && credentials.password) {
-    frigateCredentials = {
+  // If deviceToken is provided, store credentials per-device (multi-user mode)
+  if (deviceToken && credentials?.username && credentials?.password) {
+    const deviceCreds = {
       username: credentials.username,
       password: credentials.password,
+      jwtToken: token,
+      externalUrl: externalUrl || bridgeConfig.externalFrigateUrl || null,
+      lastRefresh: Date.now(),
     };
-    saveCredentials();
-    console.log(`[Bridge] Frigate credentials stored for auto-refresh: ${credentials.username}`);
+    
+    deviceCredentials.set(deviceToken, deviceCreds);
+    saveDeviceCredentials();
+    isPerDevice = true;
+    
+    const tokenPreview = deviceToken.substring(0, 20) + '...';
+    console.log(`[Bridge] ✅ Per-device credentials stored: ${credentials.username} (${tokenPreview})`);
+    console.log(`[Bridge] Total devices with credentials: ${deviceCredentials.size}`);
+  } else {
+    // Fallback to legacy global credentials
+    bridgeConfig.frigateJwtToken = token;
+    
+    if (externalUrl) {
+      bridgeConfig.externalFrigateUrl = externalUrl;
+    }
+    
+    // Store credentials for automatic refresh (encrypted)
+    if (credentials && credentials.username && credentials.password) {
+      frigateCredentials = {
+        username: credentials.username,
+        password: credentials.password,
+      };
+      saveCredentials();
+      console.log(`[Bridge] LEGACY global credentials stored: ${credentials.username}`);
+    }
+    
+    saveConfig();
   }
-  
-  saveConfig();
   
   console.log(`[Bridge] Frigate JWT token updated: ${token.substring(0, 20)}...`);
   if (externalUrl) {
     console.log(`[Bridge] External Frigate URL updated: ${externalUrl}`);
   }
   
-  // Check token expiration
-  const expCheck = checkTokenExpiration();
+  // Check token expiration (per-device if available, else global)
+  const expCheck = isPerDevice 
+    ? checkTokenExpirationForDevice(deviceToken)
+    : checkTokenExpiration();
   let expiresInStr = null;
   if (expCheck.expiresIn) {
     const hours = Math.floor(expCheck.expiresIn / 3600);
@@ -827,15 +1039,57 @@ app.post('/config/frigate-token', async (req, res) => {
   
   res.json({ 
     success: true, 
-    message: 'Frigate configuration updated successfully',
+    message: isPerDevice 
+      ? `Per-device credentials configured for ${credentials.username}` 
+      : 'Frigate configuration updated successfully',
     configured: true,
-    autoRefreshEnabled: !!frigateCredentials,
+    autoRefreshEnabled: isPerDevice || !!frigateCredentials,
+    multiUserMode: isPerDevice,
+    totalDevicesWithCredentials: deviceCredentials.size,
     tokenExpiresIn: expiresInStr,
   });
 });
 
-// Get Frigate token status
+// Get Frigate token status (supports per-device query)
 app.get('/config/frigate-token', (req, res) => {
+  const { deviceToken } = req.query;
+  
+  // Check if querying for specific device
+  if (deviceToken && deviceCredentials.has(deviceToken)) {
+    const creds = deviceCredentials.get(deviceToken);
+    const expCheck = checkTokenExpirationForDevice(deviceToken);
+    let expiresInStr = null;
+    let status = 'not_configured';
+    
+    if (creds.jwtToken) {
+      if (expCheck.expired) {
+        status = 'expired';
+      } else if (expCheck.expiringSoon) {
+        status = 'expiring_soon';
+      } else {
+        status = 'valid';
+      }
+      
+      if (expCheck.expiresIn) {
+        const hours = Math.floor(expCheck.expiresIn / 3600);
+        const mins = Math.floor((expCheck.expiresIn % 3600) / 60);
+        expiresInStr = `${hours}h ${mins}m`;
+      }
+    }
+    
+    return res.json({
+      configured: !!creds.jwtToken,
+      externalFrigateUrl: creds.externalUrl || bridgeConfig.externalFrigateUrl,
+      autoRefreshEnabled: true,
+      credentialsUsername: creds.username,
+      tokenStatus: status,
+      tokenExpiresIn: expiresInStr,
+      multiUserMode: true,
+      lastRefresh: creds.lastRefresh ? new Date(creds.lastRefresh).toISOString() : null,
+    });
+  }
+  
+  // Global/legacy status
   const expCheck = checkTokenExpiration();
   let expiresInStr = null;
   let status = 'not_configured';
@@ -857,25 +1111,73 @@ app.get('/config/frigate-token', (req, res) => {
   }
   
   res.json({
-    configured: !!bridgeConfig.frigateJwtToken,
+    configured: !!bridgeConfig.frigateJwtToken || deviceCredentials.size > 0,
     externalFrigateUrl: bridgeConfig.externalFrigateUrl,
-    autoRefreshEnabled: !!frigateCredentials,
+    autoRefreshEnabled: !!frigateCredentials || deviceCredentials.size > 0,
     credentialsUsername: frigateCredentials?.username || null,
     tokenStatus: status,
     tokenExpiresIn: expiresInStr,
+    multiUserMode: deviceCredentials.size > 0,
+    totalDevicesWithCredentials: deviceCredentials.size,
   });
 });
 
-// Manually trigger token refresh
+// Manually trigger token refresh (supports per-device)
 app.post('/config/frigate-token/refresh', async (req, res) => {
-  if (!frigateCredentials) {
+  const { deviceToken } = req.body;
+  
+  // Check if device-specific refresh
+  if (deviceToken && deviceCredentials.has(deviceToken)) {
+    const creds = deviceCredentials.get(deviceToken);
+    console.log(`[API] Manual token refresh requested for device: ${creds.username}`);
+    
+    const success = await refreshFrigateToken(deviceToken);
+    
+    if (success) {
+      const expCheck = checkTokenExpirationForDevice(deviceToken);
+      let expiresInStr = null;
+      if (expCheck.expiresIn) {
+        const hours = Math.floor(expCheck.expiresIn / 3600);
+        const mins = Math.floor((expCheck.expiresIn % 3600) / 60);
+        expiresInStr = `${hours}h ${mins}m`;
+      }
+      
+      return res.json({ 
+        success: true, 
+        message: `Token refreshed for ${creds.username}`,
+        tokenExpiresIn: expiresInStr,
+        multiUserMode: true,
+      });
+    } else {
+      return res.status(500).json({ 
+        success: false, 
+        error: `Failed to refresh token for ${creds.username}. Check credentials.` 
+      });
+    }
+  }
+  
+  // Legacy global refresh
+  if (!frigateCredentials && deviceCredentials.size === 0) {
     return res.status(400).json({ 
       success: false, 
       error: 'No credentials stored. Send credentials with token to enable auto-refresh.' 
     });
   }
   
-  console.log('[API] Manual token refresh requested');
+  // If we have per-device credentials but no specific device requested, refresh all
+  if (deviceCredentials.size > 0 && !deviceToken) {
+    console.log('[API] Manual refresh requested for ALL devices');
+    const result = await refreshAllDeviceTokens(0); // Force refresh all
+    return res.json({
+      success: result.failedCount === 0,
+      message: `Refreshed ${result.refreshedCount} device(s), ${result.failedCount} failed`,
+      refreshedCount: result.refreshedCount,
+      failedCount: result.failedCount,
+      multiUserMode: true,
+    });
+  }
+  
+  console.log('[API] Manual LEGACY token refresh requested');
   const success = await refreshFrigateToken();
   
   if (success) {
